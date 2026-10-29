@@ -5,17 +5,19 @@ const pino = require("pino");
 const fs = require("fs");
 const path = require("path");
 const http = require("http");
-const { exec } = require("child_process");
 
 const AUTH_FOLDER = path.join(__dirname, "auth_info_baileys");
 const CONTACTED_CUSTOMERS_FILE = path.join(__dirname, "contacted_customers.json");
+const ORDER_TRACKING_FILE = path.join(__dirname, "order_tracking_status.json");
+const SENT_ALERTS_FILE = path.join(__dirname, "sent_alerts.json");
 
 let activeSock = null;
 let currentQrDataUrl = null;
 let isBotConnected = false;
-let browserOpened = false;
 
+// -------------------------------------------------------------
 // 🔒 PRIVACY WHITELIST: Sirf wahi numbers jinhe website se message gaya ho
+// -------------------------------------------------------------
 let contactedCustomers = new Set();
 
 function loadContactedCustomers() {
@@ -40,19 +42,67 @@ function recordContactedCustomer(rawPhone) {
   }
 }
 
-// Store database se sabhi customer numbers sync karein
+// -------------------------------------------------------------
+// 📦 ORDER TRACKING & VIP ADVANCE STATE HELPERS
+// -------------------------------------------------------------
+function getOrderTrackingMap() {
+  try {
+    if (fs.existsSync(ORDER_TRACKING_FILE)) {
+      return JSON.parse(fs.readFileSync(ORDER_TRACKING_FILE, "utf-8"));
+    }
+  } catch (e) {}
+  return {};
+}
+
+function saveOrderTrackingMap(map) {
+  try {
+    fs.writeFileSync(ORDER_TRACKING_FILE, JSON.stringify(map, null, 2), "utf-8");
+  } catch (e) {}
+}
+
+function getOrderByPhone(rawPhone) {
+  if (!rawPhone) return null;
+  const cleanPhone = String(rawPhone).replace(/[^0-9]/g, "").slice(-10);
+  const map = getOrderTrackingMap();
+  for (const id in map) {
+    if (map[id].phone === cleanPhone) {
+      return map[id];
+    }
+  }
+  return null;
+}
+
+// Store database se sabhi customer numbers aur order details sync karein
 async function syncStoreCustomers() {
   try {
     const res = await fetch("https://youthup.in/api/orders");
     const data = await res.json();
+    const trackingMap = getOrderTrackingMap();
+
     if (data && data.success && Array.isArray(data.orders)) {
       for (const o of data.orders) {
         if (o.customer?.phone) {
           const p = String(o.customer.phone).replace(/[^0-9]/g, "").slice(-10);
           if (p.length === 10) contactedCustomers.add(p);
+
+          // Populate order tracking map if not exists
+          if (o.orderId && !trackingMap[o.orderId]) {
+            trackingMap[o.orderId] = {
+              orderId: o.orderId,
+              phone: p,
+              customerName: o.customer?.name || "Customer",
+              productTitle: o.item?.title || "YouthUp Product",
+              totalAmount: o.item?.totalAmount || 0,
+              createdAt: o.createdAt || new Date().toISOString(),
+              paidVip: o.paymentStatus === "PAID" || o.paymentStatus === "VIP_TOKEN_PAID",
+              reminderSent: false
+            };
+          }
         }
       }
+      saveOrderTrackingMap(trackingMap);
     }
+
     try {
       const abRes = await fetch("https://youthup.in/api/abandoned-cart");
       const abData = await abRes.json();
@@ -77,6 +127,9 @@ loadContactedCustomers();
 syncStoreCustomers();
 setInterval(syncStoreCustomers, 5 * 60 * 1000);
 
+// -------------------------------------------------------------
+// 🤖 WHATSAPP CLIENT INITIALIZATION & MESSAGE HANDLING
+// -------------------------------------------------------------
 async function startWhatsAppBot() {
   console.log("==================================================");
   console.log("🤖 YouthUp Real WhatsApp Auto-Reply Bot Starting...");
@@ -102,12 +155,6 @@ async function startWhatsAppBot() {
     if (qr) {
       try {
         currentQrDataUrl = await QRCode.toDataURL(qr, { width: 260, margin: 1 });
-        const htmlPath = path.join(__dirname, "scan_qr.html");
-        fs.writeFileSync(
-          htmlPath,
-          getQrHtml(currentQrDataUrl),
-          "utf-8"
-        );
         console.log("\n📲 [ACTION REQUIRED] QR Code ready in Website Admin Panel!");
         console.log("👉 youthup.in/admin > Tab 5 (WhatsApp Bot) par scan karein");
       } catch (e) {
@@ -128,9 +175,8 @@ async function startWhatsAppBot() {
       currentQrDataUrl = null;
       console.log("\n✅ ==================================================");
       console.log("🎉 WHATSAPP BOT CONNECTED SUCCESSFULLY!");
-      console.log("Bot is now actively listening for incoming customer messages.");
-      console.log("Any customer message will receive an INSTANT AUTO-REPLY!");
-      console.log("HTTP Outgoing Dispatcher active on port 5005");
+      console.log("Bot is actively listening for verified customer messages.");
+      console.log("Outgoing HTTP Dispatcher active on port 5005");
       console.log("==================================================\n");
     }
   });
@@ -144,7 +190,7 @@ async function startWhatsAppBot() {
       const sender = msg.key.remoteJid;
       if (!sender) return;
 
-      // 1. Groups & Broadcasts ko bilkul ignore karein
+      // 1. 🛑 GROUPS & BROADCASTS KO BILKUL IGNORE KAREIN
       if (sender.endsWith("@g.us") || sender.endsWith("@broadcast") || sender === "status@broadcast") {
         return;
       }
@@ -161,6 +207,11 @@ async function startWhatsAppBot() {
         "";
 
       const lower = text.toLowerCase().trim();
+      const hasImage = Boolean(msg.message.imageMessage || msg.message.documentMessage);
+
+      // Customer Recognition
+      const isContactedCustomer = contactedCustomers.has(senderPhone);
+      const customerOrder = getOrderByPhone(senderPhone);
 
       // 0. Direct 1-Tap Order Confirmation ("1", "confirm", "yes", "haan", "ok")
       const isConfirmIntent =
@@ -175,44 +226,67 @@ async function startWhatsAppBot() {
         lower.includes("confirm karo") ||
         lower.includes("dispatch kar do");
 
-      // 1. VIP ₹50 Advance Confirmation / Screenshot
-      const isVipPaymentIntent =
-        lower.includes("50") ||
+      // 1. Buyer wants to Pay ₹50 Token ("50", "token", "advance kaise du")
+      const isVipTokenRequest =
+        lower === "50" ||
+        lower === "token" ||
+        lower === "advance" ||
+        lower.includes("50 kaise") ||
+        lower.includes("token kaise") ||
+        lower.includes("advance kaise") ||
+        lower.includes("upi id") ||
+        lower.includes("qr code");
+
+      // 2. Buyer has PAID ₹50 Advance / Sent Screenshot
+      const isVipPaymentDone =
         lower.includes("paid") ||
         lower.includes("pay kar diya") ||
-        lower.includes("advance") ||
-        lower.includes("screenshot");
+        lower.includes("bhej diya") ||
+        lower.includes("done") ||
+        lower.includes("screenshot") ||
+        lower.includes("ho gaya") ||
+        (hasImage && (lower.includes("50") || lower.includes("pay") || lower === ""));
 
-      // 2. Check: Kya ye message website ke "Order on WhatsApp" button se aaya hai?
+      // 3. Buyer asks about Tracking / "Kahan tak pahucha"
+      const isTrackingInquiry =
+        lower.includes("kahan") ||
+        lower.includes("pahucha") ||
+        lower.includes("pahuche") ||
+        lower.includes("track") ||
+        lower.includes("status") ||
+        lower.includes("kab tak") ||
+        lower.includes("kab aayega") ||
+        lower.includes("kab milega") ||
+        lower.includes("delivery");
+
+      // 4. Check: Kya ye message website ke "Order on WhatsApp" button se aaya hai?
       const isWebsiteOrderClick =
         lower.includes("cash on delivery par chahiye") ||
         lower.includes("youthup") ||
         lower.includes("youthup.in") ||
-        (lower.includes("order") && lower.includes("chahiye")) ||
-        (lower.includes("order confirm") && lower.includes("karein"));
+        (lower.includes("order") && lower.includes("chahiye"));
 
-      // 3. Customer sent Address details
+      // 5. Customer sent Address details
       const isAddressDetails =
         (lower.includes("pin") || lower.includes("pincode") || /\b\d{6}\b/.test(lower)) &&
         (lower.includes("naam") || lower.includes("house") || lower.includes("gali") || lower.includes("road") || lower.includes("nagar") || lower.includes("colony") || lower.includes("shahar"));
 
-      // 4. Delivery / Tracking inquiry
-      const isTrackingInquiry =
-        lower.includes("delivery") || lower.includes("din") || lower.includes("kab tak") || lower.includes("time") || lower.includes("track");
-
-      // 5. COD / Payment inquiry
+      // 6. COD / Payment inquiry
       const isPaymentInquiry =
         lower.includes("cod") || lower.includes("cash on delivery") || lower.includes("advance payment");
 
-      // Customer recognition
-      const isContactedCustomer = contactedCustomers.has(senderPhone);
-      const isKnownCustomerAction = isConfirmIntent || isVipPaymentIntent || isWebsiteOrderClick || isAddressDetails;
+      const isKnownCustomerAction =
+        isConfirmIntent ||
+        isVipTokenRequest ||
+        isVipPaymentDone ||
+        isWebsiteOrderClick ||
+        isAddressDetails;
 
       // 🛑 STRICT PRIVACY RULE:
-      // Agar na toh yeh koi order action hai, aur na hi yeh kisi purane verified customer ka sawaal hai:
-      // TOH KISI BHI PERSONAL CHAT / BANK / FRIEND KO BILKUL REPLY NAHI JAYEGA!
+      // Agar na toh yeh koi order action hai, aur na hi yeh kisi verified store customer ka sawaal hai:
+      // TOH KISI BHI PERSONAL CHAT / BANK / FRIEND / FAMILY KO BILKUL REPLY NAHI JAYEGA!
       if (!isKnownCustomerAction && !isContactedCustomer) {
-        console.log(`⏭️ [SKIPPED PERSONAL CHAT] Message from ${senderPhone} ignored. (Not a customer intent).`);
+        console.log(`⏭️ [SKIPPED NON-CUSTOMER / PERSONAL CHAT] ${senderPhone}: "${text}"`);
         return;
       }
 
@@ -224,9 +298,89 @@ async function startWhatsAppBot() {
       // ORDER INTENT HANDLERS:
       // ---------------------------------------------------------
 
-      // 0. Buyer ne "1" ya "CONFIRM" bheja
+      // 1. TRACKING INQUIRY ("Kahan tak pahucha", "Track", "Status")
+      if (isTrackingInquiry) {
+        const orderId = customerOrder ? customerOrder.orderId : "";
+        const trackUrl = orderId ? `https://youthup.in/track?id=${orderId}` : `https://youthup.in/track`;
+
+        const replyText =
+          `📍 *Aapka Live Order Tracker Link:*\n\n` +
+          `👉 ${trackUrl}\n\n` +
+          `📦 *Order ID:* ${orderId || "Latest Order"}\n` +
+          `🚚 *Courier Partner:* Delhivery / BlueDart Express\n` +
+          `⏱️ *Expected Delivery:* 3-5 Working Days\n\n` +
+          `Upar diye link par click karke aap parcel ki live location dekh sakte hain. Dhanyawad! 🙏`;
+
+        await sock.sendMessage(sender, { text: replyText });
+        console.log(`🤖 Replied Tracking Link to ${senderPhone}`);
+        return;
+      }
+
+      // 2. VIP PAYMENT DONE ("paid", "screenshot", "advance bhej diya")
+      if (isVipPaymentDone) {
+        const trackingMap = getOrderTrackingMap();
+        let totalAmt = 0;
+        let orderId = "";
+
+        if (customerOrder && customerOrder.orderId) {
+          orderId = customerOrder.orderId;
+          totalAmt = customerOrder.totalAmount || 0;
+          if (trackingMap[orderId]) {
+            trackingMap[orderId].paidVip = true;
+            saveOrderTrackingMap(trackingMap);
+          }
+        }
+
+        const remainingCod = Math.max(0, totalAmt > 0 ? totalAmt - 50 : 0);
+
+        try {
+          fetch("https://youthup.in/api/orders", {
+            method: "PATCH",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ customerPhone: senderPhone, paymentStatus: "VIP_TOKEN_PAID" })
+          }).catch(() => {});
+        } catch (e) {}
+
+        const replyText =
+          `👑 *YOUTHUP VIP CUSTOMER - FAST DELIVERY ACTIVATED!*\n\n` +
+          `🎉 *Shukriya! Aapka ₹50 Advance Token Receive Ho Gaya Hai.*\n\n` +
+          `⚡ *Delivery Status:* Superfast VIP Priority Dispatch Queue\n` +
+          `📦 Hamari warehouse team aapka parcel aaj hi Delhivery/BlueDart express se dispatch kar rahi hai.\n\n` +
+          `💰 *Updated COD Balance Details:*\n` +
+          (totalAmt > 0 ? `• Total Order Amount: ₹${totalAmt}\n` : "") +
+          `• Advance Token Paid: -₹50\n` +
+          (remainingCod > 0 ? `• *Delivery Boy Ko Dene Honge: Sirf ₹${remainingCod} (Remaining COD)*\n\n` : `• *Remaining Balance: Flat ₹50 KAM dena hoga delivery par!*\n\n`) +
+          `📍 *Order Tracking:* Parcel live track karne ke liye bas *TRACK* likhkar bhejein.\n\n` +
+          `YouthUp Store par bharosa karne ke liye dil se dhanyawad! 🙏`;
+
+        await sock.sendMessage(sender, { text: replyText });
+        console.log(`🤖 Replied VIP Customer Confirmation to ${senderPhone}`);
+        return;
+      }
+
+      // 3. BUYER REPLIED "50" (Wants to pay VIP advance token)
+      if (isVipTokenRequest) {
+        const totalAmt = customerOrder?.totalAmount || 0;
+        const remainingCod = Math.max(0, totalAmt - 50);
+
+        const replyText =
+          `⚡ *₹50 Advance Token Payment (VIP Fast Delivery):*\n\n` +
+          `Aap kisi bhi UPI App (PhonePe / Google Pay / Paytm) se ₹50 send kar sakte hain:\n\n` +
+          `📱 *UPI ID:* 9555247659@ybl\n` +
+          `👤 *Account Name:* YouthUp Store\n` +
+          `💰 *Amount:* ₹50\n\n` +
+          `✅ *Pay karne ke baad yahan SCREENSHOT ya "PAID" likhkar bhej dein.*\n\n` +
+          `⚡ *Fayde:*\n` +
+          `1. Parcel aaj hi VIP Priority se express courier se dispatch hoga.\n` +
+          `2. Delivery ke waqt flat ₹50 KAM (sirf *₹${remainingCod > 0 ? remainingCod : "discounted balance"}*) COD dena hoga!`;
+
+        await sock.sendMessage(sender, { text: replyText });
+        console.log(`🤖 Sent VIP Token UPI Instructions to ${senderPhone}`);
+        return;
+      }
+
+      // 4. BUYER REPLIED "1" / "CONFIRM"
       if (isConfirmIntent) {
-        // Mark confirmed in store API
         try {
           fetch("https://youthup.in/api/orders", {
             method: "PATCH",
@@ -240,34 +394,17 @@ async function startWhatsAppBot() {
           `✅ *Status:* Locked in Warehouse Packaging Queue\n` +
           `📦 Hamari team aapka parcel pack karke Delhivery/BlueDart express se dispatch kar rahi hai.\n` +
           `🚚 *Delivery Time:* 3-4 Business Days mein aapke address par deliver ho jayega.\n\n` +
-          `⚡ *Speed Up (VIP Delivery Offer):*\n` +
-          `Agar aap sirf *₹50 advance UPI* pay karte hain toh parcel *aaj hi VIP priority* se dispatch hoga aur delivery par *₹50 KAM* COD dena hoga:\n` +
-          `🔘 *1-Tap Pay via PhonePe / GPay / Paytm:*\n` +
-          `👉 https://youthup.in/pay\n\n` +
-          `🔗 *Live Order Tracking:* https://youthup.in/track\n\n` +
+          `🔘 *[ ⚡ UPGRADE TO VIP FAST DELIVERY ]*\n` +
+          `Agar aap sirf *₹50 advance token* UPI se pay karte hain toh parcel *aaj hi VIP priority* se dispatch hoga aur delivery par *₹50 KAM* COD dena hoga:\n` +
+          `👉 Token pay karne ke liye bas *50* reply karein.\n\n` +
           `Shukriya! Team YouthUp 🙏`;
 
         await sock.sendMessage(sender, { text: replyText });
-        console.log(`🤖 Auto-replied Order Confirmation to ${sender}`);
+        console.log(`🤖 Auto-replied Order Confirmation to ${senderPhone}`);
         return;
       }
 
-      // 1. VIP ₹50 Advance Confirmation / Screenshot
-      if (isVipPaymentIntent) {
-        const replyText =
-          `🎉 *Shukriya! Aapka ₹50 VIP Advance Payment Receive Ho Gaya Hai!*\n\n` +
-          `Aapka order *VIP Superfast Dispatch* queue mein mark kar diya gaya hai.\n\n` +
-          `⚡ *Benefit:* Delivery ke waqt parcel aane par aapko total amount mein se *Flat ₹50 KAM* dena hoga (Remaining COD only).\n` +
-          `📦 Hamari team aaj hi parcel Delhivery/BlueDart express se dispatch kar degi.\n\n` +
-          `🚚 *Live Order Tracking Link:* https://youthup.in/track\n\n` +
-          `YouthUp Store par bharosa karne ke liye dil se dhanyawad! 🙏`;
-
-        await sock.sendMessage(sender, { text: replyText });
-        console.log(`🤖 Auto-replied VIP 50 Confirmation to ${sender}`);
-        return;
-      }
-
-      // 2. Website ke "Order on WhatsApp" button se aaya
+      // 5. WEBSITE ORDER CLICK (Initiated from website WhatsApp button)
       if (isWebsiteOrderClick) {
         const replyText =
           `Namaste! 🙏 *YouthUp Smart Store* se order karne ke liye bohot shukriya.\n\n` +
@@ -277,68 +414,57 @@ async function startWhatsAppBot() {
           `📍 *3. Shahar (City) & State:*\n` +
           `📮 *4. Pincode (6 Digits):*\n\n` +
           `🚚 *Payment:* 100% Free Cash on Delivery (COD) - Paisa parcel milne par dein.\n` +
-          `⚡ *VIP Delivery Offer:* Advance ₹50 UPI pay karne par aaj hi Superfast dispatch hoga!\n` +
-          `🔗 *Track Order:* https://youthup.in/track\n\n` +
-          `_(Aap chahein toh seedha hamari official website https://youthup.in par jakar bhi 1-click me order book kar sakte hain)_`;
+          `🔘 *[ ⚡ PAY ₹50 VIP TOKEN ]* ➔ Fast delivery ke liye bas *50* reply karein!`;
 
         await sock.sendMessage(sender, { text: replyText });
-        console.log(`🤖 Auto-replied with Order Confirmation Form to ${sender}`);
+        console.log(`🤖 Auto-replied with Order Confirmation Form to ${senderPhone}`);
         return;
       }
 
-      // 3. Customer sent Address details
+      // 6. CUSTOMER SENT ADDRESS DETAILS
       if (isAddressDetails) {
         const replyText =
           `🎉 *Aapki Delivery Details Mil Gayi Hain!*\n\n` +
           `Aapka Cash on Delivery order successfully confirm kar diya gaya hai.\n\n` +
           `📦 *Status:* Ready for Warehouse Dispatch\n` +
-          `🚚 *Delivery:* 3-5 Din mein parcel aapke ghar deliver ho jayega.\n` +
-          `🔗 *Live Tracking Link:* https://youthup.in/track\n\n` +
+          `🚚 *Delivery:* 3-5 Din mein parcel aapke ghar deliver ho jayega.\n\n` +
+          `🔘 *[ ⚡ FAST DELIVERY VIP OFFER ]*\n` +
+          `Agar aap ₹50 advance token pay karte hain toh delivery boy ko ₹50 kam dena hoga aur parcel aaj hi VIP Priority se dispatch hoga!\n` +
+          `👉 Pay karne ke liye bas *50* reply karein.\n\n` +
           `Thank you for shopping with *YouthUp Store*! 🙏`;
 
         await sock.sendMessage(sender, { text: replyText });
-        console.log(`🤖 Auto-replied Address Confirmation to ${sender}`);
+        console.log(`🤖 Auto-replied Address Confirmation to ${senderPhone}`);
         return;
       }
 
-      // 4. Tracking query (verified customers only)
-      if (isTrackingInquiry && isContactedCustomer) {
-        const replyText =
-          `⚡ *Delivery & Tracking Details:*\n\n` +
-          `• Metro Cities: 2 se 3 din\n` +
-          `• All India: 3 se 5 working days\n\n` +
-          `Aap apna live parcel yahan track kar sakte hain:\n` +
-          `👉 *https://youthup.in/track*\n\n` +
-          `Delhivery/BlueDart express courier dwara dispatch hota hai. 100% Free Delivery! 🚚`;
-
-        await sock.sendMessage(sender, { text: replyText });
-        return;
-      }
-
-      // 5. COD inquiry (verified customers only)
+      // 7. COD INQUIRY (Verified store customers only)
       if (isPaymentInquiry && isContactedCustomer) {
         const replyText =
           `💵 *100% Free Cash on Delivery (COD)!*\n\n` +
           `Aapko pehle 1 rupaya bhi dene ki zaroorat nahi hai. Parcel ghar pahunchne par cash dein ya delivery boy ke scanner par UPI karein.\n\n` +
-          `⚡ *Special VIP Offer:* Agar aap ₹50 advance UPI se pay karte hain, toh delivery boy ko ₹50 kam dena hoga aur order aaj hi priority dispatch hoga!`;
+          `🔘 *[ ⚡ SPECIAL VIP OFFER ]*\n` +
+          `Agar aap ₹50 advance token UPI se pay karte hain, toh delivery boy ko ₹50 kam dena hoga aur order aaj hi priority dispatch hoga!\n` +
+          `👉 Token pay karne ke liye bas *50* reply karein.`;
 
         await sock.sendMessage(sender, { text: replyText });
         return;
       }
 
-      // 6. Generic Greeting (Hi/Hello/Help - verified customers only)
+      // 8. GENERIC GREETING (Hi/Hello - Verified store customers only)
       if ((lower === "hi" || lower === "hello" || lower === "namaste" || lower === "help") && isContactedCustomer) {
         const replyText =
           `Namaste! 🙏 *YouthUp Smart Store* mein aapka swagat hai.\n\n` +
           `Main aapki kya sahayata kar sakta hoon?\n\n` +
-          `1️⃣ Order Confirm karne ke liye *1* bhejein\n` +
-          `2️⃣ Free Cash on Delivery uplabdh hai\n` +
-          `3️⃣ Order Track Karein: https://youthup.in/track\n` +
-          `4️⃣ Official Website: https://youthup.in`;
+          `🔘 *[ ✅ CONFIRM ORDER ]* ➔ Reply *1*\n` +
+          `🔘 *[ ⚡ VIP FAST DELIVERY ]* ➔ Reply *50*\n` +
+          `🔘 *[ 📍 TRACK ORDER ]* ➔ Reply *TRACK*\n\n` +
+          `Hamari team aapki poori madad karegi!`;
 
         await sock.sendMessage(sender, { text: replyText });
         return;
       }
+
     } catch (err) {
       console.error("Error processing incoming message:", err);
     }
@@ -346,10 +472,210 @@ async function startWhatsAppBot() {
 }
 
 // -------------------------------------------------------------
-// HTTP Server for Outgoing Order Alerts from Next.js (Port 5005)
+// ⏰ AUTOMATED 3-4 HOUR VIP REMINDER ENGINE
+// -------------------------------------------------------------
+async function checkAndSendVipReminders() {
+  if (!activeSock || !isBotConnected) return;
+
+  try {
+    const trackingMap = getOrderTrackingMap();
+    const now = Date.now();
+    let isMapUpdated = false;
+
+    for (const orderId in trackingMap) {
+      const order = trackingMap[orderId];
+      if (!order || !order.phone) continue;
+
+      // 1. Agar buyer ne already token money pay kar di hai, toh REMINDER KABHI NAHI JAYEGA!
+      if (order.paidVip) {
+        continue;
+      }
+
+      // 2. Agar reminder already send ho chuka hai, dubara spam na karein
+      if (order.reminderSent) {
+        continue;
+      }
+
+      const orderTime = new Date(order.createdAt).getTime();
+      const ageHours = (now - orderTime) / (1000 * 60 * 60);
+
+      // 3 se 5 ghante ke beech reminder bhejein
+      if (ageHours >= 3 && ageHours <= 5) {
+        const cleanPhone = String(order.phone).replace(/[^0-9]/g, "").slice(-10);
+        if (cleanPhone.length !== 10) continue;
+
+        const jid = `91${cleanPhone}@s.whatsapp.net`;
+        const remainingCod = Math.max(0, (order.totalAmount || 0) - 50);
+
+        const reminderMsg =
+`⏰ *REMINDER: VIP Priority Dispatch Offer - YouthUp Store*
+
+Namaste ${order.customerName || "Ji"}!
+Aapka Order #${order.orderId} (${order.productTitle || "Product"}) warehouse packing station par ready hai.
+
+⚡ *Fast Delivery & Special Discount:*
+Agar aap sirf *₹50 Advance Token* pay karte hain toh delivery boy ko parcel milne par Flat ₹50 KAM (sirf *₹${remainingCod}*) COD dena hoga aur parcel *Superfast VIP Priority* se dispatch hoga!
+
+🔘 *[ ⚡ PAY ₹50 VIP TOKEN ]*
+👉 Bas *50* reply karein aur token pay karein.
+
+🔘 *[ 📍 TRACK ORDER ]*
+👉 Order live track karne ke liye *TRACK* reply karein.
+
+_(Agar aap normal Cash on Delivery hi chahte hain toh reply na karein, parcel jald deliver hoga)_ 🙏`;
+
+        try {
+          await activeSock.sendMessage(jid, { text: reminderMsg });
+          order.reminderSent = true;
+          isMapUpdated = true;
+          console.log(`⏰ [VIP REMINDER SENT] 3-4hr token reminder sent for #${order.orderId} to +91${cleanPhone}`);
+        } catch (sendErr) {
+          console.error(`Failed to dispatch reminder to ${jid}:`, sendErr.message);
+        }
+      }
+    }
+
+    if (isMapUpdated) {
+      saveOrderTrackingMap(trackingMap);
+    }
+  } catch (err) {
+    console.error("Error in checkAndSendVipReminders:", err);
+  }
+}
+
+// Run VIP Reminder check every 5 minutes
+setInterval(checkAndSendVipReminders, 5 * 60 * 1000);
+
+// -------------------------------------------------------------
+// 24x7 CLOUD ORDER WATCHER: Automatic order alerts on new orders
+// -------------------------------------------------------------
+function getSentAlerts() {
+  try {
+    if (fs.existsSync(SENT_ALERTS_FILE)) {
+      return JSON.parse(fs.readFileSync(SENT_ALERTS_FILE, "utf-8"));
+    }
+  } catch (e) {}
+  return [];
+}
+
+function markAlertSent(orderId) {
+  try {
+    const list = getSentAlerts();
+    if (!list.includes(orderId)) {
+      list.push(orderId);
+      fs.writeFileSync(SENT_ALERTS_FILE, JSON.stringify(list, null, 2), "utf-8");
+    }
+  } catch (e) {}
+}
+
+async function checkAndSendNewOrderAlerts() {
+  if (!activeSock || !isBotConnected) return;
+
+  try {
+    const res = await fetch("https://youthup.in/api/orders");
+    const data = await res.json();
+    if (!data.success || !Array.isArray(data.orders)) return;
+
+    const sentList = getSentAlerts();
+    const trackingMap = getOrderTrackingMap();
+
+    for (const order of data.orders) {
+      if (!order.orderId || sentList.includes(order.orderId)) {
+        continue;
+      }
+
+      // 1. Agar order already confirmed ya dispatched hai, toh dubara alert bilkul na jaye
+      if (order.status && order.status !== "PENDING_CONFIRMATION") {
+        markAlertSent(order.orderId);
+        continue;
+      }
+
+      // 2. Sirf taze orders ko alert bhejein (last 20 minutes)
+      if (order.createdAt) {
+        const orderAgeMinutes = (Date.now() - new Date(order.createdAt).getTime()) / (1000 * 60);
+        if (orderAgeMinutes > 20) {
+          markAlertSent(order.orderId);
+          continue;
+        }
+      }
+
+      const phone = order.customer?.phone;
+      if (!phone) {
+        markAlertSent(order.orderId);
+        continue;
+      }
+
+      const cleanPhone = phone.replace(/[^0-9]/g, "").slice(-10);
+      if (cleanPhone.length !== 10) {
+        markAlertSent(order.orderId);
+        continue;
+      }
+
+      const jid = `91${cleanPhone}@s.whatsapp.net`;
+      const remainingCod = Math.max(0, (order.item?.totalAmount || 0) - 50);
+
+      // Save order in tracking map for 3-4hr reminders
+      trackingMap[order.orderId] = {
+        orderId: order.orderId,
+        phone: cleanPhone,
+        customerName: order.customer?.name || "Customer",
+        productTitle: order.item?.title || "YouthUp Product",
+        totalAmount: order.item?.totalAmount || 0,
+        createdAt: order.createdAt || new Date().toISOString(),
+        paidVip: order.paymentStatus === "PAID" || order.paymentStatus === "VIP_TOKEN_PAID",
+        reminderSent: false
+      };
+      saveOrderTrackingMap(trackingMap);
+
+      // NO RAW WEBSITE LINKS! Clean Button-Style Action Prompts
+      const messageText = 
+`🎉 *Namaste ${order.customer?.name || "Customer"} Ji!*
+YouthUp Store se aapka order successfully book ho gaya hai.
+
+📦 *Order ID:* ${order.orderId}
+🏷️ *Product:* ${order.item?.title || "YouthUp Product"}
+💰 *Total Amount:* Rs. ${order.item?.totalAmount || 0} (${order.paymentMethod || "Cash on Delivery"})
+📍 *Delivery Address:* ${order.customer?.address || ""}, ${order.customer?.city || ""} - ${order.customer?.pincode || ""}
+
+---
+🔘 *[ ✅ CONFIRM ORDER ]*
+Order confirm karne ke liye bas *1* ya *CONFIRM* reply karein.
+
+🔘 *[ ⚡ PAY ₹50 VIP TOKEN (FAST DELIVERY) ]*
+Agar aap *Rs 50 advance token* UPI se pay karte hain:
+• Parcel aaj hi Superfast VIP Priority se dispatch hoga
+• Delivery ke waqt Flat Rs 50 KAM (sirf *Rs. ${remainingCod}*) COD dena hoga
+• Token pay karne ke liye bas *50* reply karein
+
+---
+🚚 *Delivery Time:* 3-5 working days.
+📍 *Order kahan tak pahucha janne ke liye:* Bas *TRACK* reply karein.
+
+Shukriya! Team YouthUp 🙏
+*YouthUp Helpline: +91 95552 47659*`;
+
+      try {
+        recordContactedCustomer(cleanPhone);
+        await activeSock.sendMessage(jid, { text: messageText });
+        console.log(`\n🚀 [AUTO-ALERT SENT] Order #${order.orderId} successfully sent on WhatsApp to +91${cleanPhone}!`);
+        markAlertSent(order.orderId);
+      } catch (sendErr) {
+        console.error(`Failed to dispatch alert to ${jid}:`, sendErr.message);
+      }
+    }
+  } catch (err) {
+    // Network retry silent
+  }
+}
+
+// Check every 4 seconds for new customer orders
+setInterval(checkAndSendNewOrderAlerts, 4000);
+console.log("👀 Cloud Order Watcher active: Checking https://youthup.in every 4 seconds for new orders!");
+
+// -------------------------------------------------------------
+// 🌐 HTTP SERVER (PORT 5005 / RENDER PORT)
 // -------------------------------------------------------------
 const server = http.createServer(async (req, res) => {
-  // Set CORS headers
   res.setHeader("Access-Control-Allow-Origin", "*");
   res.setHeader("Access-Control-Allow-Methods", "POST, GET, OPTIONS");
   res.setHeader("Access-Control-Allow-Headers", "Content-Type");
@@ -515,122 +841,6 @@ const PORT = process.env.PORT || 5005;
 server.listen(PORT, "0.0.0.0", () => {
   console.log(`⚡ Bot HTTP Alert Dispatcher listening on port ${PORT}`);
 });
-
-// -------------------------------------------------------------
-// 24x7 Cloud Order Watcher: Automatically picks up new orders
-// from https://youthup.in and dispatches WhatsApp messages!
-// -------------------------------------------------------------
-const SENT_ALERTS_FILE = path.join(__dirname, "sent_alerts.json");
-
-function getSentAlerts() {
-  try {
-    if (fs.existsSync(SENT_ALERTS_FILE)) {
-      return JSON.parse(fs.readFileSync(SENT_ALERTS_FILE, "utf-8"));
-    }
-  } catch (e) {}
-  return [];
-}
-
-function markAlertSent(orderId) {
-  try {
-    const list = getSentAlerts();
-    if (!list.includes(orderId)) {
-      list.push(orderId);
-      fs.writeFileSync(SENT_ALERTS_FILE, JSON.stringify(list, null, 2), "utf-8");
-    }
-  } catch (e) {}
-}
-
-async function checkAndSendNewOrderAlerts() {
-  if (!activeSock) return;
-
-  try {
-    const res = await fetch("https://youthup.in/api/orders");
-    const data = await res.json();
-    if (!data.success || !Array.isArray(data.orders)) return;
-
-    const sentList = getSentAlerts();
-
-    for (const order of data.orders) {
-      if (!order.orderId || sentList.includes(order.orderId)) {
-        continue;
-      }
-
-      // 1. Agar order already confirmed ya dispatched hai, toh dubara alert bilkul na jaye
-      if (order.status && order.status !== "PENDING_CONFIRMATION") {
-        markAlertSent(order.orderId);
-        continue;
-      }
-
-      // 2. Sirf taze orders ko alert bhejein (last 20 minutes)
-      // Isse server restart ya deploy hone par purane buyers ko dubara message nahi jayega
-      if (order.createdAt) {
-        const orderAgeMinutes = (Date.now() - new Date(order.createdAt).getTime()) / (1000 * 60);
-        if (orderAgeMinutes > 20) {
-          markAlertSent(order.orderId);
-          continue;
-        }
-      }
-
-      const phone = order.customer?.phone;
-      if (!phone) {
-        markAlertSent(order.orderId);
-        continue;
-      }
-
-      const cleanPhone = phone.replace(/[^0-9]/g, "").slice(-10);
-      if (cleanPhone.length !== 10) {
-        markAlertSent(order.orderId);
-        continue;
-      }
-
-      const jid = `91${cleanPhone}@s.whatsapp.net`;
-      const remainingCod = Math.max(0, (order.item?.totalAmount || 0) - 50);
-      const confirmUrl = `https://youthup.in/confirm-order?id=${order.orderId}`;
-      const payUrl = `https://youthup.in/pay?id=${order.orderId}`;
-      const trackUrl = `https://youthup.in/track?id=${order.orderId}`;
-
-      const messageText = 
-`🎉 *Namaste ${order.customer?.name || "Customer"} Ji!*
-YouthUp Store se aapka order successfully book ho gaya hai.
-
-📦 *Order ID:* ${order.orderId}
-🏷️ *Product:* ${order.item?.title || "YouthUp Product"}
-💰 *Total Amount:* Rs. ${order.item?.totalAmount || 0} (${order.paymentMethod || "COD"})
-📍 *Delivery Address:* ${order.customer?.address || ""}, ${order.customer?.city || ""} - ${order.customer?.pincode || ""}
-
-✅ *STEP 1: Order Confirm Karein:*
-Bas is message par *1* ya *CONFIRM* reply karein (ya link dabayein: ${confirmUrl})
-
-⚡ *STEP 2: VIP FAST DISPATCH (Fast Delivery Offer):*
-Agar aap sirf *Rs 50* advance UPI se pay kar dete hain, toh aapka parcel aaj hi VIP Priority se pack hokar express courier se nikal jayega, aur delivery ke waqt Flat Rs 50 KAM (sirf *Rs. ${remainingCod}*) COD dena hoga!
-
-🔘 *1-Tap Pay via PhonePe / GPay / Paytm:*
-👉 ${payUrl}
-
-🚚 *Live Order Status Track Karein:*
-${trackUrl}
-
-Aapka parcel 3-5 working days mein deliver ho jayega. Koi sawaal ho toh is message par reply karein. Dhanyawad! 🙏
-*YouthUp India Support: +91 95552 47659*`;
-
-      try {
-        recordContactedCustomer(cleanPhone);
-        await activeSock.sendMessage(jid, { text: messageText });
-        console.log(`\n🚀 [AUTO-ALERT SENT] Order #${order.orderId} automatically sent on WhatsApp to +91${cleanPhone}!`);
-        markAlertSent(order.orderId);
-      } catch (sendErr) {
-        console.error(`Failed to dispatch alert to ${jid}:`, sendErr.message);
-      }
-    }
-  } catch (err) {
-    // Network retry silent
-  }
-}
-
-// Check every 4 seconds for new customer orders
-setInterval(checkAndSendNewOrderAlerts, 4000);
-console.log("👀 Cloud Order Watcher active: Checking https://youthup.in every 4 seconds for new orders!");
 
 // 24x7 Cloud Self-Ping (Prevents Render free tier from sleeping)
 if (process.env.RENDER_EXTERNAL_URL) {
