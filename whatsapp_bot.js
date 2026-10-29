@@ -16,7 +16,7 @@ let currentQrDataUrl = null;
 let isBotConnected = false;
 
 // -------------------------------------------------------------
-// 🔒 PRIVACY WHITELIST: Sirf wahi numbers jinhe website se message gaya ho
+// ðŸ”’ PRIVACY WHITELIST: Sirf wahi numbers jinhe website se message gaya ho
 // -------------------------------------------------------------
 let contactedCustomers = new Set();
 
@@ -43,7 +43,38 @@ function recordContactedCustomer(rawPhone) {
 }
 
 // -------------------------------------------------------------
-// 📦 ORDER TRACKING & VIP ADVANCE STATE HELPERS
+// âš™ï¸ STORE SETTINGS SYNC (CMS Dynamic Full Pay Discount & VIP Token)
+// -------------------------------------------------------------
+let storeSettings = {
+  vipFastAmount: 50,
+  fullPayDiscount: 100,
+  upiId: "9555247659@paytm",
+  upiName: "YouthUp"
+};
+
+async function syncStoreSettings() {
+  try {
+    const res = await fetch("https://youthup.in/api/settings");
+    const data = await res.json();
+    if (data && data.success && data.settings) {
+      if (data.settings.vipFastAmount !== undefined) {
+        storeSettings.vipFastAmount = Number(data.settings.vipFastAmount) || 50;
+      }
+      if (data.settings.fullPayDiscount !== undefined) {
+        storeSettings.fullPayDiscount = Number(data.settings.fullPayDiscount) || 100;
+      }
+      if (data.settings.upiId) storeSettings.upiId = data.settings.upiId;
+      if (data.settings.upiName) storeSettings.upiName = data.settings.upiName;
+      console.log(`âš™ï¸ [CMS SETTINGS SYNC] VIP Token: â‚¹${storeSettings.vipFastAmount} | Full Pay Discount: â‚¹${storeSettings.fullPayDiscount}`);
+    }
+  } catch (e) {}
+}
+
+syncStoreSettings();
+setInterval(syncStoreSettings, 2 * 60 * 1000); // Har 2 minute me CMS settings sync karein
+
+// -------------------------------------------------------------
+// ðŸ“¦ ORDER TRACKING & VIP ADVANCE STATE HELPERS
 // -------------------------------------------------------------
 function getOrderTrackingMap() {
   try {
@@ -117,7 +148,7 @@ async function syncStoreCustomers() {
     } catch (e) {}
 
     fs.writeFileSync(CONTACTED_CUSTOMERS_FILE, JSON.stringify(Array.from(contactedCustomers), null, 2));
-    console.log(`📋 [CUSTOMER SYNC] Total ${contactedCustomers.size} verified store numbers loaded into auto-reply whitelist.`);
+    console.log(`ðŸ“‹ [CUSTOMER SYNC] Total ${contactedCustomers.size} verified store numbers loaded into auto-reply whitelist.`);
   } catch (err) {
     // Offline or retry
   }
@@ -128,11 +159,11 @@ syncStoreCustomers();
 setInterval(syncStoreCustomers, 5 * 60 * 1000);
 
 // -------------------------------------------------------------
-// 🤖 WHATSAPP CLIENT INITIALIZATION & MESSAGE HANDLING
+// ðŸ¤– WHATSAPP CLIENT INITIALIZATION & MESSAGE HANDLING
 // -------------------------------------------------------------
 async function startWhatsAppBot() {
   console.log("==================================================");
-  console.log("🤖 YouthUp Real WhatsApp Auto-Reply Bot Starting...");
+  console.log("ðŸ¤– YouthUp Real WhatsApp Auto-Reply Bot Starting...");
   console.log("Store: youthup.in | Support: +91 95552 47659");
   console.log("==================================================");
 
@@ -155,8 +186,8 @@ async function startWhatsAppBot() {
     if (qr) {
       try {
         currentQrDataUrl = await QRCode.toDataURL(qr, { width: 260, margin: 1 });
-        console.log("\n📲 [ACTION REQUIRED] QR Code ready in Website Admin Panel!");
-        console.log("👉 youthup.in/admin > Tab 5 (WhatsApp Bot) par scan karein");
+        console.log("\nðŸ“² [ACTION REQUIRED] QR Code ready in Website Admin Panel!");
+        console.log("ðŸ‘‰ youthup.in/admin > Tab 5 (WhatsApp Bot) par scan karein");
       } catch (e) {
         console.error("QR image error:", e);
       }
@@ -166,15 +197,15 @@ async function startWhatsAppBot() {
       isBotConnected = false;
       const shouldReconnect =
         lastDisconnect?.error?.output?.statusCode !== DisconnectReason.loggedOut;
-      console.log("⚠️ Connection closed. Reconnecting:", shouldReconnect);
+      console.log("âš ï¸ Connection closed. Reconnecting:", shouldReconnect);
       if (shouldReconnect) {
         startWhatsAppBot();
       }
     } else if (connection === "open") {
       isBotConnected = true;
       currentQrDataUrl = null;
-      console.log("\n✅ ==================================================");
-      console.log("🎉 WHATSAPP BOT CONNECTED SUCCESSFULLY!");
+      console.log("\nâœ… ==================================================");
+      console.log("ðŸŽ‰ WHATSAPP BOT CONNECTED SUCCESSFULLY!");
       console.log("Bot is actively listening for verified customer messages.");
       console.log("Outgoing HTTP Dispatcher active on port 5005");
       console.log("==================================================\n");
@@ -190,7 +221,7 @@ async function startWhatsAppBot() {
       const sender = msg.key.remoteJid;
       if (!sender) return;
 
-      // 1. 🛑 GROUPS & BROADCASTS KO BILKUL IGNORE KAREIN
+      // 1. ðŸ›‘ GROUPS & BROADCASTS KO BILKUL IGNORE KAREIN
       if (sender.endsWith("@g.us") || sender.endsWith("@broadcast") || sender === "status@broadcast") {
         return;
       }
@@ -225,7 +256,7 @@ async function startWhatsAppBot() {
         lower.includes("confirm karo") ||
         lower.includes("dispatch kar do");
 
-      // 1. Buyer wants to Pay ₹50 Token ("50", "token", "advance kaise du")
+      // 1. Buyer wants to Pay â‚¹50 Token ("50", "token", "advance kaise du")
       const isVipTokenRequest =
         lower === "50" ||
         lower === "token" ||
@@ -234,15 +265,14 @@ async function startWhatsAppBot() {
         lower.includes("token kaise") ||
         lower.includes("advance kaise");
 
-      // 1.5 Buyer wants FULL PAYMENT / ₹100 DISCOUNT ("full", "100", "full payment", "online payment")
+      // 1.5 Buyer wants FULL PAYMENT / CMS DISCOUNT ("full", "100", "full payment", "online payment")
       const isFullPaymentIntent =
         lower === "full" ||
         lower === "100" ||
         lower.includes("full payment") ||
         lower.includes("full pay") ||
         lower.includes("online payment") ||
-        lower.includes("100 discount") ||
-        lower.includes("100 off") ||
+        lower.includes("discount") ||
         lower.includes("pura payment") ||
         lower.includes("chhoot");
 
@@ -292,17 +322,17 @@ async function startWhatsAppBot() {
         isWebsiteOrderClick ||
         isAddressDetails;
 
-      // 🛑 STRICT PRIVACY RULE:
+      // ðŸ›‘ STRICT PRIVACY RULE:
       // Agar na toh yeh koi order action hai, aur na hi yeh kisi verified store customer ka sawaal hai:
       // TOH KISI BHI PERSONAL CHAT / BANK / FRIEND / FAMILY KO BILKUL REPLY NAHI JAYEGA!
       if (!isKnownCustomerAction && !isContactedCustomer) {
-        console.log(`⏭️ [SKIPPED NON-CUSTOMER / PERSONAL CHAT] ${senderPhone}: "${text}"`);
+        console.log(`â­ï¸ [SKIPPED NON-CUSTOMER / PERSONAL CHAT] ${senderPhone}: "${text}"`);
         return;
       }
 
       // Customer ko whitelist me record karein
       recordContactedCustomer(senderPhone);
-      console.log(`📩 [VERIFIED CUSTOMER] ${senderPhone}: "${text}"`);
+      console.log(`ðŸ“© [VERIFIED CUSTOMER] ${senderPhone}: "${text}"`);
 
       // Order lookup (local cache + live sync fallback)
       let customerOrder = getOrderByPhone(senderPhone);
@@ -344,47 +374,48 @@ async function startWhatsAppBot() {
         const trackUrl = orderId ? `https://youthup.in/track?id=${orderId}` : `https://youthup.in/track`;
 
         const replyText =
-          `📍 *Aapka Live Order Tracker Link:*\n\n` +
-          `👉 ${trackUrl}\n\n` +
-          `📦 *Order ID:* ${orderId || "Latest Order"}\n` +
-          `🚚 *Courier Partner:* Delhivery / BlueDart Express\n` +
-          `⏱️ *Expected Delivery:* 3-5 Working Days\n\n` +
-          `Upar diye link par click karke aap parcel ki live location dekh sakte hain. Dhanyawad! 🙏`;
+          `ðŸ“ *Aapka Live Order Tracker Link:*\n\n` +
+          `ðŸ‘‰ ${trackUrl}\n\n` +
+          `ðŸ“¦ *Order ID:* ${orderId || "Latest Order"}\n` +
+          `ðŸšš *Courier Partner:* Delhivery / BlueDart Express\n` +
+          `â±ï¸ *Expected Delivery:* 3-5 Working Days\n\n` +
+          `Upar diye link par click karke aap parcel ki live location dekh sakte hain. Dhanyawad! ðŸ™`;
 
         await sock.sendMessage(sender, { text: replyText });
-        console.log(`🤖 Replied Tracking Link to ${senderPhone}`);
+        console.log(`ðŸ¤– Replied Tracking Link to ${senderPhone}`);
         return;
       }
 
-      // 2. BUYER REPLIED "FULL" / "100" (Full Payment with Flat ₹100 Instant Discount)
+      // 2. BUYER REPLIED "FULL" / "100" (Full Payment with Flat Discount from CMS)
       if (isFullPaymentIntent) {
         const orderId = customerOrder?.orderId || "YU-ORDER";
         const totalAmt = customerOrder?.totalAmount || 0;
-        const fullDiscountAmt = Math.max(0, totalAmt - 100);
-        const payWebUrl = `https://youthup.in/pay?id=${orderId}&mode=full`;
+        const fullDiscount = storeSettings.fullPayDiscount ?? 100;
+        const fullDiscountAmt = Math.max(0, totalAmt - fullDiscount);
+        const payWebUrl = `https://youthup.in/pay?id=${orderId}&mode=full&am=${fullDiscountAmt}`;
 
         const replyText =
-          `🎁 *SUPER SAVER OFFER - FLAT ₹100 INSTANT DISCOUNT!*\n\n` +
-          `Aapke order par Flat ₹100 instant discount lag gaya hai:\n` +
-          (totalAmt > 0 ? `• Asli Price: Rs. ${totalAmt}\n` : "") +
-          `• Online Discount: -Rs. 100\n` +
-          (fullDiscountAmt > 0 ? `• *Aapko Pay Karna Hai: Sirf Rs. ${fullDiscountAmt}*\n\n` : `• *Flat ₹100 Discount Lag Gaya Hai!*\n\n`) +
-          `🔘 *[ ⚡ 1-CLICK PAY VIA UPI (SAVE ₹100) ]*\n` +
-          `👉 ${payWebUrl}\n` +
-          `_(Link click karte hi PhonePe / GPay / Paytm khul jayega)_\n\n` +
-          `📱 *Manual UPI Details:*\n` +
-          `• UPI ID: 9555247659@paytm\n` +
-          `• Name: YouthUp\n` +
-          `• Amount: Rs. ${fullDiscountAmt > 0 ? fullDiscountAmt : "Total - 100"}\n` +
-          `• Note: FULL_${orderId}\n\n` +
-          `✅ *Pay karne ke baad yahan SCREENSHOT ya "PAID" bhej dein.*\n\n` +
-          `⚡ *Fayde:*\n` +
-          `1. Flat ₹100 ki sidhi bachat!\n` +
+          `ðŸŽ *SUPER SAVER OFFER - FLAT â‚¹${fullDiscount} INSTANT DISCOUNT!*\n\n` +
+          `Aapke order par Flat â‚¹${fullDiscount} instant discount lag gaya hai:\n` +
+          (totalAmt > 0 ? `â€¢ Asli Price: Rs. ${totalAmt}\n` : "") +
+          `â€¢ Online Discount: -Rs. ${fullDiscount}\n` +
+          (fullDiscountAmt > 0 ? `â€¢ *Aapko Pay Karna Hai: Sirf Rs. ${fullDiscountAmt}*\n\n` : `â€¢ *Flat â‚¹${fullDiscount} Discount Lag Gaya Hai!*\n\n`) +
+          `ðŸ”˜ *[ âš¡ 1-CLICK PAY VIA UPI (SAVE â‚¹${fullDiscount}) ]*\n` +
+          `ðŸ‘‰ ${payWebUrl}\n` +
+          `_(Link click karte hi PhonePe / GPay / Paytm seedha khul jayega)_\n\n` +
+          `ðŸ“± *Manual UPI Details:*\n` +
+          `â€¢ UPI ID: ${storeSettings.upiId || "9555247659@paytm"}\n` +
+          `â€¢ Name: ${storeSettings.upiName || "YouthUp"}\n` +
+          `â€¢ Amount: Rs. ${fullDiscountAmt > 0 ? fullDiscountAmt : `Total - ${fullDiscount}`}\n` +
+          `â€¢ Note: FULL_${orderId}\n\n` +
+          `âœ… *Pay karne ke baad yahan SCREENSHOT ya "PAID" bhej dein.*\n\n` +
+          `âš¡ *Fayde:*\n` +
+          `1. Flat â‚¹${fullDiscount} ki sidhi bachat!\n` +
           `2. Delivery par Zero (Rs. 0) Cash dena hoga.\n` +
           `3. Parcel aaj hi Superfast VIP Priority se dispatch hoga!`;
 
         await sock.sendMessage(sender, { text: replyText });
-        console.log(`🤖 Sent Full Payment Discount Instructions to ${senderPhone}`);
+        console.log(`ðŸ¤– Sent Full Payment Discount Instructions to ${senderPhone}`);
         return;
       }
 
@@ -414,19 +445,19 @@ async function startWhatsAppBot() {
         } catch (e) {}
 
         const replyText =
-          `👑 *YOUTHUP VIP CUSTOMER - FAST DELIVERY ACTIVATED!*\n\n` +
-          `🎉 *Shukriya! Aapka Payment Receive Ho Gaya Hai.*\n\n` +
-          `⚡ *Delivery Status:* Superfast VIP Priority Dispatch Queue\n` +
-          `📦 Hamari warehouse team aapka parcel aaj hi Delhivery/BlueDart express se dispatch kar rahi hai.\n\n` +
-          `💰 *Updated COD Balance Details:*\n` +
-          (totalAmt > 0 ? `• Total Order Amount: Rs. ${totalAmt}\n` : "") +
-          `• Online Payment Received: Done\n` +
-          (remainingCod > 0 ? `• *Delivery Boy Ko Dene Honge: Sirf Rs. ${remainingCod} (Remaining COD)*\n\n` : `• *Zero Payment at Delivery (Full Paid)*\n\n`) +
-          `📍 *Order Tracking:* Parcel live track karne ke liye bas *TRACK* likhkar bhejein.\n\n` +
-          `YouthUp Store par bharosa karne ke liye dil se dhanyawad! 🙏`;
+          `ðŸ‘‘ *YOUTHUP VIP CUSTOMER - FAST DELIVERY ACTIVATED!*\n\n` +
+          `ðŸŽ‰ *Shukriya! Aapka Payment Receive Ho Gaya Hai.*\n\n` +
+          `âš¡ *Delivery Status:* Superfast VIP Priority Dispatch Queue\n` +
+          `ðŸ“¦ Hamari warehouse team aapka parcel aaj hi Delhivery/BlueDart express se dispatch kar rahi hai.\n\n` +
+          `ðŸ’° *Updated Balance Details:*\n` +
+          (totalAmt > 0 ? `â€¢ Total Order Amount: Rs. ${totalAmt}\n` : "") +
+          `â€¢ Online Payment Received: Done\n` +
+          (remainingCod > 0 ? `â€¢ *Delivery Boy Ko Dene Honge: Sirf Rs. ${remainingCod} (Remaining COD)*\n\n` : `â€¢ *Zero Payment at Delivery (Full Paid)*\n\n`) +
+          `ðŸ“ *Order Tracking:* Parcel live track karne ke liye bas *TRACK* likhkar bhejein.\n\n` +
+          `YouthUp Store par bharosa karne ke liye dil se dhanyawad! ðŸ™`;
 
         await sock.sendMessage(sender, { text: replyText });
-        console.log(`🤖 Replied VIP Customer Confirmation to ${senderPhone}`);
+        console.log(`ðŸ¤– Replied VIP Customer Confirmation to ${senderPhone}`);
         return;
       }
 
@@ -434,32 +465,34 @@ async function startWhatsAppBot() {
       if (isVipTokenRequest) {
         const orderId = customerOrder?.orderId || "YU-ORDER";
         const totalAmt = customerOrder?.totalAmount || 0;
-        const remainingCod = totalAmt > 50 ? totalAmt - 50 : 0;
-        const fullDiscountAmt = Math.max(0, totalAmt - 100);
-        const payWebUrl = `https://youthup.in/pay?id=${orderId}`;
-        const payFullUrl = `https://youthup.in/pay?id=${orderId}&mode=full`;
+        const vipAmount = storeSettings.vipFastAmount || 50;
+        const fullDiscount = storeSettings.fullPayDiscount ?? 100;
+        const remainingCod = Math.max(0, totalAmt - vipAmount);
+        const fullDiscountAmt = Math.max(0, totalAmt - fullDiscount);
+        const payWebUrl = `https://youthup.in/pay?id=${orderId}&mode=advance&am=${vipAmount}`;
+        const payFullUrl = `https://youthup.in/pay?id=${orderId}&mode=full&am=${fullDiscountAmt}`;
 
         const replyText =
-          `⚡ *₹50 Advance Token Payment (VIP Fast Delivery):*\n\n` +
+          `âš¡ *â‚¹${vipAmount} Advance Token Payment (VIP Fast Delivery):*\n\n` +
           `Neeche diye gaye link par click karein, aapka PhonePe / Google Pay / Paytm 1-Tap me open ho jayega:\n\n` +
-          `🔘 *[ ⚡ 1-CLICK PAY ₹50 VIA UPI ]*\n` +
-          `👉 ${payWebUrl}\n` +
+          `ðŸ”˜ *[ âš¡ 1-CLICK PAY â‚¹${vipAmount} VIA UPI ]*\n` +
+          `ðŸ‘‰ ${payWebUrl}\n` +
           `_(Link click karte hi aapke phone ka UPI App khul jayega)_\n\n` +
-          `📱 *Manual UPI Details:*\n` +
-          `• UPI ID: 9555247659@paytm\n` +
-          `• Account Name: YouthUp\n` +
-          `• Amount: Rs. 50\n` +
-          `• Note: VIP_${orderId}\n\n` +
-          `⚡ *Fayde:*\n` +
+          `ðŸ“± *Manual UPI Details:*\n` +
+          `â€¢ UPI ID: ${storeSettings.upiId || "9555247659@paytm"}\n` +
+          `â€¢ Account Name: ${storeSettings.upiName || "YouthUp"}\n` +
+          `â€¢ Amount: Rs. ${vipAmount}\n` +
+          `â€¢ Note: VIP_${orderId}\n\n` +
+          `âš¡ *Fayde:*\n` +
           `1. Parcel aaj hi VIP Priority se express courier se dispatch hoga.\n` +
           (remainingCod > 0
-            ? `2. Delivery ke waqt flat Rs. 50 KAM (sirf *Rs. ${remainingCod}*) COD dena hoga!\n\n`
-            : `2. Delivery ke waqt flat Rs. 50 KAM COD dena hoga!\n\n`) +
-          `🎁 *SPECIAL OFFER: Pura payment abhi online karne par FLAT ₹100 DISCOUNT!* (Sirf Rs. ${fullDiscountAmt > 0 ? fullDiscountAmt : "Total - 100"})\n` +
-          `👉 Full Pay Link: ${payFullUrl} (Ya *FULL* reply karein)`;
+            ? `2. Delivery ke waqt flat Rs. ${vipAmount} KAM (sirf *Rs. ${remainingCod}*) COD dena hoga!\n\n`
+            : `2. Delivery ke waqt flat Rs. ${vipAmount} KAM COD dena hoga!\n\n`) +
+          `ðŸŽ *SPECIAL OFFER: Pura payment abhi online karne par FLAT â‚¹${fullDiscount} DISCOUNT!* (Sirf Rs. ${fullDiscountAmt > 0 ? fullDiscountAmt : `Total - ${fullDiscount}`})\n` +
+          `ðŸ‘‰ Full Pay Link: ${payFullUrl} (Ya *FULL* reply karein)`;
 
         await sock.sendMessage(sender, { text: replyText });
-        console.log(`🤖 Sent VIP Token UPI Instructions to ${senderPhone}`);
+        console.log(`ðŸ¤– Sent VIP Token UPI Instructions to ${senderPhone}`);
         return;
       }
 
@@ -475,65 +508,72 @@ async function startWhatsAppBot() {
 
         const orderId = customerOrder?.orderId || "";
         const totalAmt = customerOrder?.totalAmount || 0;
-        const fullDiscountAmt = Math.max(0, totalAmt - 100);
+        const vipAmount = storeSettings.vipFastAmount || 50;
+        const fullDiscount = storeSettings.fullPayDiscount ?? 100;
+        const fullDiscountAmt = Math.max(0, totalAmt - fullDiscount);
 
         const replyText =
-          `🎉 *Aapka Order Successfully CONFIRM Ho Gaya Hai!*\n\n` +
-          `✅ *Status:* Locked in Warehouse Packaging Queue\n` +
-          `📦 Hamari team aapka parcel pack karke Delhivery/BlueDart express se dispatch kar rahi hai.\n` +
-          `🚚 *Delivery Time:* 3-4 Business Days mein aapke address par deliver ho jayega.\n\n` +
-          `🔘 *2 Exciting Offers Available:*\n` +
-          `1️⃣ *₹50 Advance Token:* Aaj hi VIP Priority se dispatch hoga aur delivery par ₹50 kam COD dena hoga. (Reply *50*)\n` +
-          `2️⃣ *Full Online Payment:* Abhi online pay karne par *FLAT ₹100 DISCOUNT* milega (Sirf Rs. ${fullDiscountAmt > 0 ? fullDiscountAmt : "Total - 100"})! (Reply *FULL*)\n\n` +
-          `Shukriya! Team YouthUp 🙏`;
+          `ðŸŽ‰ *Aapka Order Successfully CONFIRM Ho Gaya Hai!*\n\n` +
+          `âœ… *Status:* Locked in Warehouse Packaging Queue\n` +
+          `ðŸ“¦ Hamari team aapka parcel pack karke Delhivery/BlueDart express se dispatch kar rahi hai.\n` +
+          `ðŸšš *Delivery Time:* 3-4 Business Days mein aapke address par deliver ho jayega.\n\n` +
+          `ðŸ”˜ *2 Exciting Offers Available:*\n` +
+          `1ï¸âƒ£ *â‚¹${vipAmount} Advance Token:* Aaj hi VIP Priority se dispatch hoga aur delivery par â‚¹${vipAmount} kam COD dena hoga. (Reply *50*)\n` +
+          `2ï¸âƒ£ *Full Online Payment:* Abhi online pay karne par *FLAT â‚¹${fullDiscount} DISCOUNT* milega (Sirf Rs. ${fullDiscountAmt > 0 ? fullDiscountAmt : `Total - ${fullDiscount}`})! (Reply *FULL*)\n\n` +
+          `Shukriya! Team YouthUp ðŸ™`;
 
         await sock.sendMessage(sender, { text: replyText });
-        console.log(`🤖 Auto-replied Order Confirmation to ${senderPhone}`);
+        console.log(`ðŸ¤– Auto-replied Order Confirmation to ${senderPhone}`);
         return;
       }
 
       // 6. WEBSITE ORDER CLICK (Initiated from website WhatsApp button)
       if (isWebsiteOrderClick) {
+        const fullDiscount = storeSettings.fullPayDiscount ?? 100;
         const replyText =
-          `Namaste! 🙏 *YouthUp Smart Store* se order karne ke liye bohot shukriya.\n\n` +
+          `Namaste! ðŸ™ *YouthUp Smart Store* se order karne ke liye bohot shukriya.\n\n` +
           `Aapka order receive ho gaya hai! Kripya apna *Delivery Address* neeche diye format mein bhejein taaki hum turant parcel dispatch kar sakein:\n\n` +
-          `👤 *1. Pura Naam:*\n` +
-          `🏠 *2. Makaan No / Gali / Colony:*\n` +
-          `📍 *3. Shahar (City) & State:*\n` +
-          `📮 *4. Pincode (6 Digits):*\n\n` +
-          `🚚 *Payment:* 100% Free Cash on Delivery (COD) - Paisa parcel milne par dein.\n` +
-          `🎁 *Special Offer:* Abhi online full pay karne par *FLAT ₹100 DISCOUNT* milega!`;
+          `ðŸ‘¤ *1. Pura Naam:*\n` +
+          `ðŸ  *2. Makaan No / Gali / Colony:*\n` +
+          `ðŸ“ *3. Shahar (City) & State:*\n` +
+          `ðŸ“® *4. Pincode (6 Digits):*\n\n` +
+          `ðŸšš *Payment:* 100% Free Cash on Delivery (COD) - Paisa parcel milne par dein.\n` +
+          `ðŸŽ *Special Offer:* Abhi online full pay karne par *FLAT â‚¹${fullDiscount} DISCOUNT* milega!`;
 
         await sock.sendMessage(sender, { text: replyText });
-        console.log(`🤖 Auto-replied with Order Confirmation Form to ${senderPhone}`);
+        console.log(`ðŸ¤– Auto-replied with Order Confirmation Form to ${senderPhone}`);
         return;
       }
 
       // 7. CUSTOMER SENT ADDRESS DETAILS
       if (isAddressDetails) {
+        const vipAmount = storeSettings.vipFastAmount || 50;
+        const fullDiscount = storeSettings.fullPayDiscount ?? 100;
         const replyText =
-          `🎉 *Aapki Delivery Details Mil Gayi Hain!*\n\n` +
+          `ðŸŽ‰ *Aapki Delivery Details Mil Gayi Hain!*\n\n` +
           `Aapka Cash on Delivery order successfully confirm kar diya gaya hai.\n\n` +
-          `📦 *Status:* Ready for Warehouse Dispatch\n` +
-          `🚚 *Delivery:* 3-5 Din mein parcel aapke ghar deliver ho jayega.\n\n` +
-          `🔘 *[ 🎁 SPECIAL DISCOUNT OFFERS ]*\n` +
-          `• Rs. 50 Advance Token dene par Fast VIP delivery (Reply *50*)\n` +
-          `• Full online pay karne par *FLAT ₹100 DISCOUNT* (Reply *FULL*)\n\n` +
-          `Thank you for shopping with *YouthUp Store*! 🙏`;
+          `ðŸ“¦ *Status:* Ready for Warehouse Dispatch\n` +
+          `ðŸšš *Delivery:* 3-5 Din mein parcel aapke ghar deliver ho jayega.\n\n` +
+          `ðŸ”˜ *[ ðŸŽ SPECIAL DISCOUNT OFFERS ]*\n` +
+          `â€¢ Rs. ${vipAmount} Advance Token dene par Fast VIP delivery (Reply *50*)\n` +
+          `â€¢ Full online pay karne par *FLAT â‚¹${fullDiscount} DISCOUNT* (Reply *FULL*)\n\n` +
+          `Thank you for shopping with *YouthUp Store*! ðŸ™`;
 
         await sock.sendMessage(sender, { text: replyText });
-        console.log(`🤖 Auto-replied Address Confirmation to ${senderPhone}`);
+        console.log(`ðŸ¤– Auto-replied Address Confirmation to ${senderPhone}`);
         return;
       }
 
       // 8. COD INQUIRY (Verified store customers only)
       if (isPaymentInquiry && isContactedCustomer) {
+        const vipAmount = storeSettings.vipFastAmount || 50;
+        const fullDiscount = storeSettings.fullPayDiscount ?? 100;
         const replyText =
-          `💵 *100% Free Cash on Delivery (COD)!*\n\n` +
+          `ðŸ’µ *100% Free Cash on Delivery (COD)!*\n\n` +
           `Aapko pehle 1 rupaya bhi dene ki zaroorat nahi hai. Parcel ghar pahunchne par cash dein ya delivery boy ke scanner par UPI karein.\n\n` +
-          `🎁 *Online Payment Offers:*\n` +
-          `1. Rs. 50 Token dene par delivery par Rs 50 kam dena hoga aur parcel aaj hi VIP Priority se jayega (Reply *50*)\n` +
-          `2. Full payment online karne par *FLAT ₹100 DISCOUNT* milega! (Reply *FULL*)`;
+          `ðŸŽ *Online Payment Offers:*\n` +
+          `1. Rs. ${vipAmount} Token dene par delivery par Rs ${vipAmount} kam dena hoga aur parcel aaj hi VIP Priority se jayega (Reply *50*)\n` +
+          `2. Full payment online karne par *FLAT â‚¹${fullDiscount} DISCOUNT* milega! (Reply *FULL*)`;
 
         await sock.sendMessage(sender, { text: replyText });
         return;
@@ -541,13 +581,14 @@ async function startWhatsAppBot() {
 
       // 9. GENERIC GREETING (Hi/Hello - Verified store customers only)
       if ((lower === "hi" || lower === "hello" || lower === "namaste" || lower === "help") && isContactedCustomer) {
+        const fullDiscount = storeSettings.fullPayDiscount ?? 100;
         const replyText =
-          `Namaste! 🙏 *YouthUp Smart Store* mein aapka swagat hai.\n\n` +
+          `Namaste! ðŸ™ *YouthUp Smart Store* mein aapka swagat hai.\n\n` +
           `Main aapki kya sahayata kar sakta hoon?\n\n` +
-          `🔘 *[ ✅ CONFIRM ORDER ]* ➔ Reply *1*\n` +
-          `🔘 *[ ⚡ VIP FAST DELIVERY ]* ➔ Reply *50*\n` +
-          `🔘 *[ 🎁 FULL PAY FLAT ₹100 OFF ]* ➔ Reply *FULL*\n` +
-          `🔘 *[ 📍 TRACK ORDER ]* ➔ Reply *TRACK*\n\n` +
+          `ðŸ”˜ *[ âœ… CONFIRM ORDER ]* âž” Reply *1*\n` +
+          `ðŸ”˜ *[ âš¡ VIP FAST DELIVERY ]* âž” Reply *50*\n` +
+          `ðŸ”˜ *[ ðŸŽ FULL PAY FLAT â‚¹${fullDiscount} OFF ]* âž” Reply *FULL*\n` +
+          `ðŸ”˜ *[ ðŸ“ TRACK ORDER ]* âž” Reply *TRACK*\n\n` +
           `Hamari team aapki poori madad karegi!`;
 
         await sock.sendMessage(sender, { text: replyText });
@@ -561,7 +602,7 @@ async function startWhatsAppBot() {
 }
 
 // -------------------------------------------------------------
-// ⏰ AUTOMATED 3-4 HOUR VIP REMINDER ENGINE
+// â° AUTOMATED 3-4 HOUR VIP REMINDER ENGINE
 // -------------------------------------------------------------
 async function checkAndSendVipReminders() {
   if (!activeSock || !isBotConnected) return;
@@ -593,36 +634,38 @@ async function checkAndSendVipReminders() {
 
         const jid = `91${cleanPhone}@s.whatsapp.net`;
         const totalAmt = order.totalAmount || 0;
-        const remainingCod = Math.max(0, totalAmt - 50);
-        const fullDiscountAmt = Math.max(0, totalAmt - 100);
-        const payWebUrl = `https://youthup.in/pay?id=${order.orderId}`;
-        const payFullUrl = `https://youthup.in/pay?id=${order.orderId}&mode=full`;
+        const vipAmount = storeSettings.vipFastAmount || 50;
+        const fullDiscount = storeSettings.fullPayDiscount ?? 100;
+        const remainingCod = Math.max(0, totalAmt - vipAmount);
+        const fullDiscountAmt = Math.max(0, totalAmt - fullDiscount);
+        const payWebUrl = `https://youthup.in/pay?id=${order.orderId}&mode=advance&am=${vipAmount}`;
+        const payFullUrl = `https://youthup.in/pay?id=${order.orderId}&mode=full&am=${fullDiscountAmt}`;
 
         const reminderMsg =
-`⏰ *REMINDER: VIP Priority & Special Discount Offers - YouthUp Store*
+`â° *REMINDER: VIP Priority & Special Discount Offers - YouthUp Store*
 
 Namaste ${order.customerName || "Ji"}!
 Aapka Order #${order.orderId} (${order.productTitle || "Product"}) warehouse packing station par ready hai.
 
-⚡ *OFFER 1: Pay ₹50 VIP Advance Token*
-• Delivery boy ko parcel milne par Flat ₹50 KAM (sirf *Rs. ${remainingCod}*) COD dena hoga.
-👉 Bas *50* reply karein ya pay karein: ${payWebUrl}
+âš¡ *OFFER 1: Pay â‚¹${vipAmount} VIP Advance Token*
+â€¢ Delivery boy ko parcel milne par Flat â‚¹${vipAmount} KAM (sirf *Rs. ${remainingCod}*) COD dena hoga.
+ðŸ‘‰ Bas *50* reply karein ya pay karein: ${payWebUrl}
 
-🎁 *OFFER 2: Full Payment Par FLAT ₹100 DISCOUNT!*
-• Total Rs. ${totalAmt} ki jagah sirf *Rs. ${fullDiscountAmt}* pay karein aur payein Flat ₹100 Discount! Delivery par Rs 0 dena hoga.
-👉 *1-Click Pay Rs. ${fullDiscountAmt}:* ${payFullUrl}
-👉 Ya bas *FULL* ya *100* reply karein.
+ðŸŽ *OFFER 2: Full Payment Par FLAT â‚¹${fullDiscount} DISCOUNT!*
+â€¢ Total Rs. ${totalAmt} ki jagah sirf *Rs. ${fullDiscountAmt}* pay karein aur payein Flat â‚¹${fullDiscount} Discount! Delivery par Rs 0 dena hoga.
+ðŸ‘‰ *1-Click Pay Rs. ${fullDiscountAmt}:* ${payFullUrl}
+ðŸ‘‰ Ya bas *FULL* ya *100* reply karein.
 
-🔘 *[ 📍 TRACK ORDER ]*
-👉 Order live track karne ke liye *TRACK* reply karein.
+ðŸ”˜ *[ ðŸ“ TRACK ORDER ]*
+ðŸ‘‰ Order live track karne ke liye *TRACK* reply karein.
 
-_(Agar aap normal Cash on Delivery hi chahte hain toh reply na karein, parcel jald deliver hoga)_ 🙏`;
+_(Agar aap normal Cash on Delivery hi chahte hain toh reply na karein, parcel jald deliver hoga)_ ðŸ™`;
 
         try {
           await activeSock.sendMessage(jid, { text: reminderMsg });
           order.reminderSent = true;
           isMapUpdated = true;
-          console.log(`⏰ [VIP REMINDER SENT] 3-4hr token reminder sent for #${order.orderId} to +91${cleanPhone}`);
+          console.log(`â° [VIP REMINDER SENT] 3-4hr token reminder sent for #${order.orderId} to +91${cleanPhone}`);
         } catch (sendErr) {
           console.error(`Failed to dispatch reminder to ${jid}:`, sendErr.message);
         }
@@ -705,8 +748,11 @@ async function checkAndSendNewOrderAlerts() {
 
       const jid = `91${cleanPhone}@s.whatsapp.net`;
       const totalAmt = order.item?.totalAmount || 0;
-      const remainingCod = Math.max(0, totalAmt - 50);
-      const fullDiscountAmt = Math.max(0, totalAmt - 100);
+      const vipAmount = storeSettings.vipFastAmount || 50;
+      const fullDiscount = storeSettings.fullPayDiscount ?? 100;
+      const remainingCod = Math.max(0, totalAmt - vipAmount);
+      const fullDiscountAmt = Math.max(0, totalAmt - fullDiscount);
+      const payFullUrl = `https://youthup.in/pay?id=${order.orderId}&mode=full&am=${fullDiscountAmt}`;
 
       // Save order in tracking map for 3-4hr reminders
       trackingMap[order.orderId] = {
@@ -722,43 +768,43 @@ async function checkAndSendNewOrderAlerts() {
       saveOrderTrackingMap(trackingMap);
 
       const messageText = 
-`🎉 *Namaste ${order.customer?.name || "Customer"} Ji!*
+`ðŸŽ‰ *Namaste ${order.customer?.name || "Customer"} Ji!*
 YouthUp Store se aapka order successfully book ho gaya hai.
 
-📦 *Order ID:* #${order.orderId}
-🏷️ *Product:* ${order.item?.title || "YouthUp Product"}
-💰 *Total Amount:* Rs. ${totalAmt} (${order.paymentMethod || "Cash on Delivery"})
-📍 *Delivery Address:* ${order.customer?.address || ""}, ${order.customer?.city || ""} - ${order.customer?.pincode || ""}
+ðŸ“¦ *Order ID:* #${order.orderId}
+ðŸ·ï¸ *Product:* ${order.item?.title || "YouthUp Product"}
+ðŸ’° *Total Amount:* Rs. ${totalAmt} (${order.paymentMethod || "Cash on Delivery"})
+ðŸ“ *Delivery Address:* ${order.customer?.address || ""}, ${order.customer?.city || ""} - ${order.customer?.pincode || ""}
 
 ---
 Apne hisaab se payment option chunein:
 
-🔘 *1. [ ✅ CONFIRM COD ORDER ]*
-• Paisa parcel milne par dein (Rs. ${totalAmt}).
-➔ Bas *1* ya *CONFIRM* reply karein.
+ðŸ”˜ *1. [ âœ… CONFIRM COD ORDER ]*
+â€¢ Paisa parcel milne par dein (Rs. ${totalAmt}).
+âž” Bas *1* ya *CONFIRM* reply karein.
 
-🔘 *2. [ ⚡ PAY ₹50 VIP TOKEN ]*
-• Parcel aaj hi Superfast VIP Priority se dispatch hoga
-• Delivery boy ko Rs 50 KAM (sirf *Rs. ${remainingCod}*) COD dena hoga
-➔ Bas *50* reply karein.
+ðŸ”˜ *2. [ âš¡ PAY â‚¹${vipAmount} VIP TOKEN ]*
+â€¢ Parcel aaj hi Superfast VIP Priority se dispatch hoga
+â€¢ Delivery boy ko Rs ${vipAmount} KAM (sirf *Rs. ${remainingCod}*) COD dena hoga
+âž” Bas *50* reply karein.
 
-🔘 *3. [ 🎁 FULL PAYMENT - FLAT ₹100 DISCOUNT ]*
-• Abhi online pay karein aur payein *FLAT ₹100 DISCOUNT*!
-• Aapko Rs. ${totalAmt} ki jagah sirf *Rs. ${fullDiscountAmt}* dena hoga! Delivery par Zero (Rs 0) Cash.
-👉 *1-Click Pay Rs. ${fullDiscountAmt}:* https://youthup.in/pay?id=${order.orderId}&mode=full
-➔ Ya bas *FULL* ya *100* reply karein.
+ðŸ”˜ *3. [ ðŸŽ FULL PAYMENT - FLAT â‚¹${fullDiscount} DISCOUNT ]*
+â€¢ Abhi online pay karein aur payein *FLAT â‚¹${fullDiscount} DISCOUNT*!
+â€¢ Aapko Rs. ${totalAmt} ki jagah sirf *Rs. ${fullDiscountAmt}* dena hoga! Delivery par Zero (Rs 0) Cash.
+ðŸ‘‰ *1-Click Pay Rs. ${fullDiscountAmt}:* ${payFullUrl}
+âž” Ya bas *FULL* ya *100* reply karein.
 
 ---
-🚚 *Delivery Time:* 3-5 working days.
-📍 *Order kahan tak pahucha janne ke liye:* Bas *TRACK* reply karein.
+ðŸšš *Delivery Time:* 3-5 working days.
+ðŸ“ *Order kahan tak pahucha janne ke liye:* Bas *TRACK* reply karein.
 
-Shukriya! Team YouthUp 🙏
+Shukriya! Team YouthUp ðŸ™
 *YouthUp Helpline: +91 95552 47659*`;
 
       try {
         recordContactedCustomer(cleanPhone);
         await activeSock.sendMessage(jid, { text: messageText });
-        console.log(`\n🚀 [AUTO-ALERT SENT] Order #${order.orderId} successfully sent on WhatsApp to +91${cleanPhone}!`);
+        console.log(`\nðŸš€ [AUTO-ALERT SENT] Order #${order.orderId} successfully sent on WhatsApp to +91${cleanPhone}!`);
         markAlertSent(order.orderId);
       } catch (sendErr) {
         console.error(`Failed to dispatch alert to ${jid}:`, sendErr.message);
@@ -771,10 +817,10 @@ Shukriya! Team YouthUp 🙏
 
 // Check every 4 seconds for new customer orders
 setInterval(checkAndSendNewOrderAlerts, 4000);
-console.log("👀 Cloud Order Watcher active: Checking https://youthup.in every 4 seconds for new orders!");
+console.log("ðŸ‘€ Cloud Order Watcher active: Checking https://youthup.in every 4 seconds for new orders!");
 
 // -------------------------------------------------------------
-// 🌐 HTTP SERVER (PORT 5005 / RENDER PORT)
+// ðŸŒ HTTP SERVER (PORT 5005 / RENDER PORT)
 // -------------------------------------------------------------
 const server = http.createServer(async (req, res) => {
   res.setHeader("Access-Control-Allow-Origin", "*");
@@ -809,7 +855,7 @@ const server = http.createServer(async (req, res) => {
         recordContactedCustomer(cleanPhone);
 
         await activeSock.sendMessage(jid, { text: message });
-        console.log(`🚀 [OUTGOING WHATSAPP DISPATCH] Successfully sent order alert to ${jid}`);
+        console.log(`ðŸš€ [OUTGOING WHATSAPP DISPATCH] Successfully sent order alert to ${jid}`);
 
         res.writeHead(200, { "Content-Type": "application/json" });
         return res.end(JSON.stringify({ success: true, sentTo: jid }));
@@ -868,7 +914,7 @@ function getQrHtml(qrDataUrl) {
 </head>
 <body>
   <div class="card">
-    <div class="icon">🎉</div>
+    <div class="icon">ðŸŽ‰</div>
     <div class="badge">Status: Live & Connected</div>
     <h2>WhatsApp Bot Connected!</h2>
     <p>Aapka WhatsApp number successfully link ho gaya hai.<br><br>Ab website par aane wale har naye order par <b>automatic WhatsApp message</b> customer ke phone par seedha chala jayega!</p>
@@ -940,12 +986,12 @@ function getQrHtml(qrDataUrl) {
 
 const PORT = process.env.PORT || 5005;
 server.listen(PORT, "0.0.0.0", () => {
-  console.log(`⚡ Bot HTTP Alert Dispatcher listening on port ${PORT}`);
+  console.log(`âš¡ Bot HTTP Alert Dispatcher listening on port ${PORT}`);
 });
 
 // 24x7 Cloud Self-Ping (Prevents Render free tier from sleeping)
 if (process.env.RENDER_EXTERNAL_URL) {
-  console.log("⚡ Render 24x7 Self-Ping Keepalive registered for:", process.env.RENDER_EXTERNAL_URL);
+  console.log("âš¡ Render 24x7 Self-Ping Keepalive registered for:", process.env.RENDER_EXTERNAL_URL);
   setInterval(() => {
     fetch(`${process.env.RENDER_EXTERNAL_URL}/status`).catch(() => {});
   }, 10 * 60 * 1000);
