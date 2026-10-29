@@ -43,13 +43,17 @@ function recordContactedCustomer(rawPhone) {
 }
 
 // -------------------------------------------------------------
-// âš™ï¸ STORE SETTINGS SYNC (CMS Dynamic Full Pay Discount & VIP Token)
+// âš™ï¸ STORE SETTINGS SYNC (CMS Dynamic Full Pay Discount, UPI Discount & Templates)
 // -------------------------------------------------------------
 let storeSettings = {
   vipFastAmount: 50,
   fullPayDiscount: 100,
+  upiDiscountAmount: 50,
   upiId: "9555247659@paytm",
-  upiName: "YouthUp"
+  upiName: "YouthUp",
+  templatePrepaidOrder: "",
+  templateVipTokenPaid: "",
+  templateFullPaidDiscount: ""
 };
 
 async function syncStoreSettings() {
@@ -63,9 +67,15 @@ async function syncStoreSettings() {
       if (data.settings.fullPayDiscount !== undefined) {
         storeSettings.fullPayDiscount = Number(data.settings.fullPayDiscount) || 100;
       }
+      if (data.settings.upiDiscountAmount !== undefined) {
+        storeSettings.upiDiscountAmount = Number(data.settings.upiDiscountAmount) || 50;
+      }
       if (data.settings.upiId) storeSettings.upiId = data.settings.upiId;
       if (data.settings.upiName) storeSettings.upiName = data.settings.upiName;
-      console.log(`âš™ï¸ [CMS SETTINGS SYNC] VIP Token: â‚¹${storeSettings.vipFastAmount} | Full Pay Discount: â‚¹${storeSettings.fullPayDiscount}`);
+      if (data.settings.templatePrepaidOrder) storeSettings.templatePrepaidOrder = data.settings.templatePrepaidOrder;
+      if (data.settings.templateVipTokenPaid) storeSettings.templateVipTokenPaid = data.settings.templateVipTokenPaid;
+      if (data.settings.templateFullPaidDiscount) storeSettings.templateFullPaidDiscount = data.settings.templateFullPaidDiscount;
+      console.log(`âš™ï¸ [CMS SETTINGS SYNC] VIP Token: â‚¹${storeSettings.vipFastAmount} | Full Pay Disc: â‚¹${storeSettings.fullPayDiscount} | UPI Disc: â‚¹${storeSettings.upiDiscountAmount}`);
     }
   } catch (e) {}
 }
@@ -424,6 +434,10 @@ async function startWhatsAppBot() {
         const trackingMap = getOrderTrackingMap();
         let totalAmt = 0;
         let orderId = "";
+        let customerName = customerOrder?.customerName || "Customer";
+        let productTitle = customerOrder?.productTitle || "YouthUp Product";
+        const vipTokenAmt = storeSettings.vipFastAmount || 50;
+        const fullDiscount = storeSettings.fullPayDiscount ?? 100;
 
         if (customerOrder && customerOrder.orderId) {
           orderId = customerOrder.orderId;
@@ -434,30 +448,69 @@ async function startWhatsAppBot() {
           }
         }
 
-        const remainingCod = Math.max(0, totalAmt > 0 ? totalAmt - 50 : 0);
+        const remainingCod = Math.max(0, totalAmt > 0 ? totalAmt - vipTokenAmt : 0);
+        const fullPaidAmt = Math.max(0, totalAmt - fullDiscount);
+        const isExplicitFull = lower.includes("full") || lower.includes("pura") || lower.includes("100");
 
         try {
           fetch("https://youthup.in/api/orders", {
             method: "PATCH",
             headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ customerPhone: senderPhone, paymentStatus: "VIP_TOKEN_PAID" })
+            body: JSON.stringify({
+              customerPhone: senderPhone,
+              paymentStatus: isExplicitFull ? "PAID" : "VIP_TOKEN_PAID"
+            })
           }).catch(() => {});
         } catch (e) {}
 
-        const replyText =
-          `ðŸ‘‘ *YOUTHUP VIP CUSTOMER - FAST DELIVERY ACTIVATED!*\n\n` +
-          `ðŸŽ‰ *Shukriya! Aapka Payment Receive Ho Gaya Hai.*\n\n` +
-          `âš¡ *Delivery Status:* Superfast VIP Priority Dispatch Queue\n` +
-          `ðŸ“¦ Hamari warehouse team aapka parcel aaj hi Delhivery/BlueDart express se dispatch kar rahi hai.\n\n` +
-          `ðŸ’° *Updated Balance Details:*\n` +
-          (totalAmt > 0 ? `â€¢ Total Order Amount: Rs. ${totalAmt}\n` : "") +
-          `â€¢ Online Payment Received: Done\n` +
-          (remainingCod > 0 ? `â€¢ *Delivery Boy Ko Dene Honge: Sirf Rs. ${remainingCod} (Remaining COD)*\n\n` : `â€¢ *Zero Payment at Delivery (Full Paid)*\n\n`) +
-          `ðŸ“ *Order Tracking:* Parcel live track karne ke liye bas *TRACK* likhkar bhejein.\n\n` +
-          `YouthUp Store par bharosa karne ke liye dil se dhanyawad! ðŸ™`;
+        let replyText = "";
+        if (isExplicitFull) {
+          // Scenario 3: Full Payment after COD with flat discount
+          if (storeSettings.templateFullPaidDiscount && storeSettings.templateFullPaidDiscount.trim().length > 10) {
+            replyText = storeSettings.templateFullPaidDiscount
+              .replace(/{customerName}|{name}/g, customerName)
+              .replace(/{orderId}/g, orderId)
+              .replace(/{productTitle}|{product}/g, productTitle)
+              .replace(/{paidAmount}|{amount}/g, String(fullPaidAmt > 0 ? fullPaidAmt : totalAmt))
+              .replace(/{discountAmount}|{discount}/g, String(fullDiscount));
+          } else {
+            replyText =
+              `ðŸŽ‰ *FULL PAYMENT RECEIVED - â‚¹${fullDiscount} DISCOUNT APPLIED!* ðŸŽ‰\n\n` +
+              `Dear *${customerName}*,\n` +
+              `Awesome news! We have received your full online payment of *â‚¹${fullPaidAmt > 0 ? fullPaidAmt : totalAmt}* for Order *#${orderId}*.\n\n` +
+              `âœ… *Payment Status:* FULLY PAID (Saved â‚¹${fullDiscount} instant discount!)\n` +
+              `ðŸ’° *Doorstep COD Amount: â‚¹0 (Zero - Nothing to pay to courier)*\n` +
+              `ðŸ“¦ *Item:* ${productTitle}\n\n` +
+              `ðŸš€ *Status:* Your parcel is queued for immediate express priority shipping.\n\n` +
+              `Thank you for trusting YouthUp!`;
+          }
+        } else {
+          // Scenario 2: VIP Advance Token â‚¹50 Paid
+          if (storeSettings.templateVipTokenPaid && storeSettings.templateVipTokenPaid.trim().length > 10) {
+            replyText = storeSettings.templateVipTokenPaid
+              .replace(/{customerName}|{name}/g, customerName)
+              .replace(/{orderId}/g, orderId)
+              .replace(/{productTitle}|{product}/g, productTitle)
+              .replace(/{tokenAmount}|{vipAmount}/g, String(vipTokenAmt))
+              .replace(/{totalAmount}|{amount}/g, String(totalAmt))
+              .replace(/{remainingCod}/g, String(remainingCod));
+          } else {
+            replyText =
+              `âš¡ *VIP PRIORITY DISPATCH ACTIVATED!* âš¡\n\n` +
+              `Dear *${customerName}*,\n` +
+              `We received your *â‚¹${vipTokenAmt} advance token* for Order *#${orderId}*! ðŸš€\n\n` +
+              `ðŸ“¦ *Updated Order Details:*\n` +
+              `- Item: *${productTitle}*\n` +
+              `- Total Bill: â‚¹${totalAmt}\n` +
+              `- Token Paid: â‚¹${vipTokenAmt}\n` +
+              `- ðŸ’° *Remaining Cash on Delivery: â‚¹${remainingCod} only*\n\n` +
+              `ðŸ”¥ *VIP Advantage:* Your parcel is now bumped to *Priority Superfast Express Dispatch* today!\n\n` +
+              `Thank you for choosing YouthUp!`;
+          }
+        }
 
         await sock.sendMessage(sender, { text: replyText });
-        console.log(`ðŸ¤– Replied VIP Customer Confirmation to ${senderPhone}`);
+        console.log(`ðŸ¤– Replied Payment Confirmation (${isExplicitFull ? "FULL_DISCOUNT" : "VIP_TOKEN"}) to ${senderPhone}`);
         return;
       }
 
@@ -721,7 +774,9 @@ async function checkAndSendNewOrderAlerts() {
         continue;
       }
 
-      if (order.status && order.status !== "PENDING_CONFIRMATION") {
+      const isPrepaidOrder = order.paymentMethod === "UPI" || order.paymentStatus === "PAID";
+
+      if (!isPrepaidOrder && order.status && order.status !== "PENDING_CONFIRMATION") {
         markAlertSent(order.orderId);
         continue;
       }
@@ -762,12 +817,50 @@ async function checkAndSendNewOrderAlerts() {
         productTitle: order.item?.title || "YouthUp Product",
         totalAmount: totalAmt,
         createdAt: order.createdAt || new Date().toISOString(),
-        paidVip: order.paymentStatus === "PAID" || order.paymentStatus === "VIP_TOKEN_PAID",
+        paidVip: isPrepaidOrder || order.paymentStatus === "VIP_TOKEN_PAID",
         reminderSent: false
       };
       saveOrderTrackingMap(trackingMap);
 
-      const messageText = 
+      let messageText = "";
+
+      if (isPrepaidOrder) {
+        // Scenario 1: Product Page / Website Direct UPI Prepaid Order
+        if (storeSettings.templatePrepaidOrder && storeSettings.templatePrepaidOrder.trim().length > 10) {
+          messageText = storeSettings.templatePrepaidOrder
+            .replace(/{customerName}|{name}/g, order.customer?.name || "Customer")
+            .replace(/{orderId}/g, order.orderId)
+            .replace(/{productTitle}|{product}/g, order.item?.title || "YouthUp Product")
+            .replace(/{quantity}|{qty}/g, String(order.item?.quantity || 1))
+            .replace(/{totalAmount}|{amount}/g, String(totalAmt))
+            .replace(/{customerAddress}|{address}/g, `${order.customer?.address || ""}, ${order.customer?.city || ""}`)
+            .replace(/{pincode}/g, order.customer?.pincode || "")
+            .replace(/{trackUrl}/g, `https://youthup.in/track?id=${order.orderId}`);
+        } else {
+          messageText =
+`ðŸŽ‰ *ORDER CONFIRMED & FULLY PAID!* ðŸŽ‰
+
+Dear *${order.customer?.name || "Customer"}*,
+Thank you for shopping with *YouthUp*! Your online payment for Order *#${order.orderId}* was *SUCCESSFUL*.
+
+ðŸ“¦ *Order Summary:*
+- Item: *${order.item?.title || "YouthUp Product"}*
+- Qty: ${order.item?.quantity || 1}
+- Total Paid: *â‚¹${totalAmt}* (Paid Online via UPI âš¡)
+- Delivery: *â‚¹0 (Zero COD to pay at doorstep)*
+
+ðŸšš *Dispatch Status:* Your order is verified and is being packed for express dispatch in a few hours!
+
+ðŸ“ *Delivery Address:*
+${order.customer?.address || ""}, ${order.customer?.city || ""} - ${order.customer?.pincode || ""}
+
+Live Tracking link: https://youthup.in/track?id=${order.orderId}
+
+Thank you for choosing YouthUp! ðŸ™`;
+        }
+      } else {
+        // Standard COD Order 3-Option Alert
+        messageText = 
 `ðŸŽ‰ *Namaste ${order.customer?.name || "Customer"} Ji!*
 YouthUp Store se aapka order successfully book ho gaya hai.
 
@@ -800,6 +893,7 @@ Apne hisaab se payment option chunein:
 
 Shukriya! Team YouthUp ðŸ™
 *YouthUp Helpline: +91 95552 47659*`;
+      }
 
       try {
         recordContactedCustomer(cleanPhone);
