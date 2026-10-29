@@ -8,11 +8,74 @@ const http = require("http");
 const { exec } = require("child_process");
 
 const AUTH_FOLDER = path.join(__dirname, "auth_info_baileys");
+const CONTACTED_CUSTOMERS_FILE = path.join(__dirname, "contacted_customers.json");
 
 let activeSock = null;
 let currentQrDataUrl = null;
 let isBotConnected = false;
 let browserOpened = false;
+
+// 🔒 PRIVACY WHITELIST: Sirf wahi numbers jinhe website se message gaya ho
+let contactedCustomers = new Set();
+
+function loadContactedCustomers() {
+  try {
+    if (fs.existsSync(CONTACTED_CUSTOMERS_FILE)) {
+      const data = JSON.parse(fs.readFileSync(CONTACTED_CUSTOMERS_FILE, "utf-8"));
+      contactedCustomers = new Set(data);
+    }
+  } catch (e) {
+    contactedCustomers = new Set();
+  }
+}
+
+function recordContactedCustomer(rawPhone) {
+  if (!rawPhone) return;
+  const cleanPhone = String(rawPhone).replace(/[^0-9]/g, "").slice(-10);
+  if (cleanPhone.length === 10) {
+    contactedCustomers.add(cleanPhone);
+    try {
+      fs.writeFileSync(CONTACTED_CUSTOMERS_FILE, JSON.stringify(Array.from(contactedCustomers), null, 2));
+    } catch (e) {}
+  }
+}
+
+// Store database se sabhi customer numbers sync karein
+async function syncStoreCustomers() {
+  try {
+    const res = await fetch("https://youthup.in/api/orders");
+    const data = await res.json();
+    if (data && data.success && Array.isArray(data.orders)) {
+      for (const o of data.orders) {
+        if (o.customer?.phone) {
+          const p = String(o.customer.phone).replace(/[^0-9]/g, "").slice(-10);
+          if (p.length === 10) contactedCustomers.add(p);
+        }
+      }
+    }
+    try {
+      const abRes = await fetch("https://youthup.in/api/abandoned-cart");
+      const abData = await abRes.json();
+      if (abData && abData.success && Array.isArray(abData.abandonedCarts)) {
+        for (const c of abData.abandonedCarts) {
+          if (c.phone) {
+            const p = String(c.phone).replace(/[^0-9]/g, "").slice(-10);
+            if (p.length === 10) contactedCustomers.add(p);
+          }
+        }
+      }
+    } catch (e) {}
+
+    fs.writeFileSync(CONTACTED_CUSTOMERS_FILE, JSON.stringify(Array.from(contactedCustomers), null, 2));
+    console.log(`📋 [CUSTOMER SYNC] Total ${contactedCustomers.size} verified store numbers loaded into auto-reply whitelist.`);
+  } catch (err) {
+    // Offline or retry
+  }
+}
+
+loadContactedCustomers();
+syncStoreCustomers();
+setInterval(syncStoreCustomers, 5 * 60 * 1000);
 
 async function startWhatsAppBot() {
   console.log("==================================================");
@@ -76,16 +139,50 @@ async function startWhatsAppBot() {
   sock.ev.on("messages.upsert", async (m) => {
     try {
       const msg = m.messages[0];
-      if (!msg.message || msg.key.fromMe) return; // Ignore messages sent by bot itself
+      if (!msg || !msg.message || msg.key.fromMe) return; // Ignore messages sent by bot itself
 
       const sender = msg.key.remoteJid;
+      if (!sender) return;
+
+      // 1. Groups & Broadcasts ko bilkul ignore karein
+      if (sender.endsWith("@g.us") || sender.endsWith("@broadcast") || sender === "status@broadcast") {
+        return;
+      }
+
+      const senderPhone = sender.replace(/[^0-9]/g, "").slice(-10);
       const text =
         msg.message.conversation ||
         msg.message.extendedTextMessage?.text ||
+        msg.message.imageMessage?.caption ||
         "";
 
-      console.log(`📩 Incoming message from ${sender}: "${text}"`);
       const lower = text.toLowerCase().trim();
+
+      // 2. Check: Kya ye message website ke "Order on WhatsApp" button se aaya hai?
+      const isWebsiteOrderClick =
+        lower.includes("cash on delivery par chahiye") ||
+        lower.includes("youthup") ||
+        lower.includes("youthup.in") ||
+        (lower.includes("order") && lower.includes("chahiye")) ||
+        (lower.includes("order confirm") && lower.includes("karein"));
+
+      // 3. Check: Kya is customer ko website/store se pehle koi message bheja gaya hai?
+      const isContactedCustomer = contactedCustomers.has(senderPhone);
+
+      // 🛑 STRICT PRIVACY RULE:
+      // Auto-reply bas usi ko jaye jise website se pehle message gaya ho, ya jo website se aaya ho!
+      // Friends, family, relatives aur personal contacts ko BILKUL BHI AUTO-REPLY NAHI JAYEGA!
+      if (!isContactedCustomer && !isWebsiteOrderClick) {
+        console.log(`⏭️ [SKIPPED PERSONAL CHAT] Message from ${senderPhone} ignored. (Not a website customer).`);
+        return;
+      }
+
+      // Agar customer ne website se order initiate kiya, use whitelist me save karein
+      if (isWebsiteOrderClick) {
+        recordContactedCustomer(senderPhone);
+      }
+
+      console.log(`📩 [VERIFIED CUSTOMER] ${senderPhone}: "${text}"`);
 
       // 0. Direct 1-Tap Order Confirmation ("1", "confirm", "yes", "haan", "ok")
       if (
@@ -99,13 +196,12 @@ async function startWhatsAppBot() {
         lower.includes("confirm karo") ||
         lower.includes("dispatch kar do")
       ) {
-        const phone = sender.replace(/[^0-9]/g, "").slice(-10);
         // Mark confirmed in store API
         try {
           fetch("https://youthup.in/api/orders", {
             method: "PATCH",
             headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ customerPhone: phone, status: "CONFIRMED" })
+            body: JSON.stringify({ customerPhone: senderPhone, status: "CONFIRMED" })
           }).catch(() => {});
         } catch (e) {}
 
@@ -215,28 +311,21 @@ async function startWhatsAppBot() {
         return;
       }
 
-      // 6. Generic Greeting (Hi, Hello, Namaste)
+      // 6. Generic Greeting (Hi, Hello, Namaste, Help)
       if (lower === "hi" || lower === "hello" || lower === "namaste" || lower === "hey" || lower === "help") {
         const replyText =
           `Namaste! 🙏 *YouthUp Smart Store* mein aapka swagat hai.\n\n` +
           `Main aapki kya sahayata kar sakta hoon?\n\n` +
-          `1️⃣ Product Order karne ke liye product ka naam bhejein\n` +
+          `1️⃣ Order Confirm karne ke liye *1* bhejein\n` +
           `2️⃣ Free Cash on Delivery uplabdh hai\n` +
           `3️⃣ Order Track Karein: https://youthup.in/track\n` +
-          `4️⃣ Official Website: https://youthup.in\n\n` +
-          `Aapko kaunsa product chahiye?`;
+          `4️⃣ Official Website: https://youthup.in`;
 
         await sock.sendMessage(sender, { text: replyText });
         return;
       }
 
-      // 7. Default Auto-Reply
-      const defaultReply =
-        `Namaste! 🙏 YouthUp Store Support Team ko aapka message mil gaya hai.\n\n` +
-        `Order book karne ya live parcel track karne ke liye visit karein: https://youthup.in/track\n\n` +
-        `Hamara team member jald se jald aapse connect karega.`;
-
-      await sock.sendMessage(sender, { text: defaultReply });
+      // NOTE: Default auto-reply has been permanently removed so no unsolicited messages are sent.
     } catch (err) {
       console.error("Error processing incoming message:", err);
     }
@@ -277,6 +366,7 @@ const server = http.createServer(async (req, res) => {
 
         const cleanPhone = phone.replace(/[^0-9]/g, "").slice(-10);
         const jid = `91${cleanPhone}@s.whatsapp.net`;
+        recordContactedCustomer(cleanPhone);
 
         await activeSock.sendMessage(jid, { text: message });
         console.log(`🚀 [OUTGOING WHATSAPP DISPATCH] Successfully sent order alert to ${jid}`);
@@ -496,6 +586,7 @@ Aapka parcel 3-5 working days mein deliver ho jayega. Koi sawaal ho toh is messa
 *YouthUp India Support: +91 95552 47659*`;
 
       try {
+        recordContactedCustomer(cleanPhone);
         await activeSock.sendMessage(jid, { text: messageText });
         console.log(`\n🚀 [AUTO-ALERT SENT] Order #${order.orderId} automatically sent on WhatsApp to +91${cleanPhone}!`);
         markAlertSent(order.orderId);
