@@ -154,9 +154,34 @@ async function startWhatsAppBot() {
         msg.message.conversation ||
         msg.message.extendedTextMessage?.text ||
         msg.message.imageMessage?.caption ||
+        msg.message.ephemeralMessage?.message?.conversation ||
+        msg.message.ephemeralMessage?.message?.extendedTextMessage?.text ||
+        msg.message.viewOnceMessage?.message?.conversation ||
+        msg.message.viewOnceMessageV2?.message?.extendedTextMessage?.text ||
         "";
 
       const lower = text.toLowerCase().trim();
+
+      // 0. Direct 1-Tap Order Confirmation ("1", "confirm", "yes", "haan", "ok")
+      const isConfirmIntent =
+        lower === "1" ||
+        lower === "confirm" ||
+        lower === "yes" ||
+        lower === "haan" ||
+        lower === "ok" ||
+        lower.startsWith("1 ") ||
+        lower.endsWith(" 1") ||
+        lower.includes("order confirm") ||
+        lower.includes("confirm karo") ||
+        lower.includes("dispatch kar do");
+
+      // 1. VIP ₹50 Advance Confirmation / Screenshot
+      const isVipPaymentIntent =
+        lower.includes("50") ||
+        lower.includes("paid") ||
+        lower.includes("pay kar diya") ||
+        lower.includes("advance") ||
+        lower.includes("screenshot");
 
       // 2. Check: Kya ye message website ke "Order on WhatsApp" button se aaya hai?
       const isWebsiteOrderClick =
@@ -166,36 +191,41 @@ async function startWhatsAppBot() {
         (lower.includes("order") && lower.includes("chahiye")) ||
         (lower.includes("order confirm") && lower.includes("karein"));
 
-      // 3. Check: Kya is customer ko website/store se pehle koi message bheja gaya hai?
+      // 3. Customer sent Address details
+      const isAddressDetails =
+        (lower.includes("pin") || lower.includes("pincode") || /\b\d{6}\b/.test(lower)) &&
+        (lower.includes("naam") || lower.includes("house") || lower.includes("gali") || lower.includes("road") || lower.includes("nagar") || lower.includes("colony") || lower.includes("shahar"));
+
+      // 4. Delivery / Tracking inquiry
+      const isTrackingInquiry =
+        lower.includes("delivery") || lower.includes("din") || lower.includes("kab tak") || lower.includes("time") || lower.includes("track");
+
+      // 5. COD / Payment inquiry
+      const isPaymentInquiry =
+        lower.includes("cod") || lower.includes("cash on delivery") || lower.includes("advance payment");
+
+      // Customer recognition
       const isContactedCustomer = contactedCustomers.has(senderPhone);
+      const isKnownCustomerAction = isConfirmIntent || isVipPaymentIntent || isWebsiteOrderClick || isAddressDetails;
 
       // 🛑 STRICT PRIVACY RULE:
-      // Auto-reply bas usi ko jaye jise website se pehle message gaya ho, ya jo website se aaya ho!
-      // Friends, family, relatives aur personal contacts ko BILKUL BHI AUTO-REPLY NAHI JAYEGA!
-      if (!isContactedCustomer && !isWebsiteOrderClick) {
-        console.log(`⏭️ [SKIPPED PERSONAL CHAT] Message from ${senderPhone} ignored. (Not a website customer).`);
+      // Agar na toh yeh koi order action hai, aur na hi yeh kisi purane verified customer ka sawaal hai:
+      // TOH KISI BHI PERSONAL CHAT / BANK / FRIEND KO BILKUL REPLY NAHI JAYEGA!
+      if (!isKnownCustomerAction && !isContactedCustomer) {
+        console.log(`⏭️ [SKIPPED PERSONAL CHAT] Message from ${senderPhone} ignored. (Not a customer intent).`);
         return;
       }
 
-      // Agar customer ne website se order initiate kiya, use whitelist me save karein
-      if (isWebsiteOrderClick) {
-        recordContactedCustomer(senderPhone);
-      }
-
+      // Customer ko whitelist me record karein
+      recordContactedCustomer(senderPhone);
       console.log(`📩 [VERIFIED CUSTOMER] ${senderPhone}: "${text}"`);
 
-      // 0. Direct 1-Tap Order Confirmation ("1", "confirm", "yes", "haan", "ok")
-      if (
-        lower === "1" ||
-        lower === "confirm" ||
-        lower === "yes" ||
-        lower === "haan" ||
-        lower === "ok" ||
-        lower === "done" ||
-        lower.includes("order confirm") ||
-        lower.includes("confirm karo") ||
-        lower.includes("dispatch kar do")
-      ) {
+      // ---------------------------------------------------------
+      // ORDER INTENT HANDLERS:
+      // ---------------------------------------------------------
+
+      // 0. Buyer ne "1" ya "CONFIRM" bheja
+      if (isConfirmIntent) {
         // Mark confirmed in store API
         try {
           fetch("https://youthup.in/api/orders", {
@@ -223,14 +253,7 @@ async function startWhatsAppBot() {
       }
 
       // 1. VIP ₹50 Advance Confirmation / Screenshot
-      if (
-        lower.includes("50") ||
-        lower.includes("paid") ||
-        lower.includes("pay kar diya") ||
-        lower.includes("done") ||
-        lower.includes("advance") ||
-        lower.includes("screenshot")
-      ) {
+      if (isVipPaymentIntent) {
         const replyText =
           `🎉 *Shukriya! Aapka ₹50 VIP Advance Payment Receive Ho Gaya Hai!*\n\n` +
           `Aapka order *VIP Superfast Dispatch* queue mein mark kar diya gaya hai.\n\n` +
@@ -244,13 +267,8 @@ async function startWhatsAppBot() {
         return;
       }
 
-      // 2. Order Intent (Matches the template from website)
-      if (
-        lower.includes("cash on delivery par chahiye") ||
-        lower.includes("order confirm karein") ||
-        lower.includes("order karna hai") ||
-        (lower.includes("mujhe") && lower.includes("chahiye"))
-      ) {
+      // 2. Website ke "Order on WhatsApp" button se aaya
+      if (isWebsiteOrderClick) {
         const replyText =
           `Namaste! 🙏 *YouthUp Smart Store* se order karne ke liye bohot shukriya.\n\n` +
           `Aapka order receive ho gaya hai! Kripya apna *Delivery Address* neeche diye format mein bhejein taaki hum turant parcel dispatch kar sakein:\n\n` +
@@ -269,10 +287,7 @@ async function startWhatsAppBot() {
       }
 
       // 3. Customer sent Address details
-      if (
-        (lower.includes("pin") || lower.includes("pincode") || /\b\d{6}\b/.test(lower)) &&
-        (lower.includes("naam") || lower.includes("house") || lower.includes("gali") || lower.includes("road") || lower.includes("nagar") || lower.includes("colony"))
-      ) {
+      if (isAddressDetails) {
         const replyText =
           `🎉 *Aapki Delivery Details Mil Gayi Hain!*\n\n` +
           `Aapka Cash on Delivery order successfully confirm kar diya gaya hai.\n\n` +
@@ -286,8 +301,8 @@ async function startWhatsAppBot() {
         return;
       }
 
-      // 4. Delivery / Time questions
-      if (lower.includes("delivery") || lower.includes("din") || lower.includes("kab tak") || lower.includes("time") || lower.includes("track")) {
+      // 4. Tracking query (verified customers only)
+      if (isTrackingInquiry && isContactedCustomer) {
         const replyText =
           `⚡ *Delivery & Tracking Details:*\n\n` +
           `• Metro Cities: 2 se 3 din\n` +
@@ -300,8 +315,8 @@ async function startWhatsAppBot() {
         return;
       }
 
-      // 5. COD / Payment questions
-      if (lower.includes("cod") || lower.includes("cash") || lower.includes("advance") || lower.includes("payment")) {
+      // 5. COD inquiry (verified customers only)
+      if (isPaymentInquiry && isContactedCustomer) {
         const replyText =
           `💵 *100% Free Cash on Delivery (COD)!*\n\n` +
           `Aapko pehle 1 rupaya bhi dene ki zaroorat nahi hai. Parcel ghar pahunchne par cash dein ya delivery boy ke scanner par UPI karein.\n\n` +
@@ -311,8 +326,8 @@ async function startWhatsAppBot() {
         return;
       }
 
-      // 6. Generic Greeting (Hi, Hello, Namaste, Help)
-      if (lower === "hi" || lower === "hello" || lower === "namaste" || lower === "hey" || lower === "help") {
+      // 6. Generic Greeting (Hi/Hello/Help - verified customers only)
+      if ((lower === "hi" || lower === "hello" || lower === "namaste" || lower === "help") && isContactedCustomer) {
         const replyText =
           `Namaste! 🙏 *YouthUp Smart Store* mein aapka swagat hai.\n\n` +
           `Main aapki kya sahayata kar sakta hoon?\n\n` +
@@ -324,8 +339,6 @@ async function startWhatsAppBot() {
         await sock.sendMessage(sender, { text: replyText });
         return;
       }
-
-      // NOTE: Default auto-reply has been permanently removed so no unsolicited messages are sent.
     } catch (err) {
       console.error("Error processing incoming message:", err);
     }
@@ -541,6 +554,22 @@ async function checkAndSendNewOrderAlerts() {
     for (const order of data.orders) {
       if (!order.orderId || sentList.includes(order.orderId)) {
         continue;
+      }
+
+      // 1. Agar order already confirmed ya dispatched hai, toh dubara alert bilkul na jaye
+      if (order.status && order.status !== "PENDING_CONFIRMATION") {
+        markAlertSent(order.orderId);
+        continue;
+      }
+
+      // 2. Sirf taze orders ko alert bhejein (last 20 minutes)
+      // Isse server restart ya deploy hone par purane buyers ko dubara message nahi jayega
+      if (order.createdAt) {
+        const orderAgeMinutes = (Date.now() - new Date(order.createdAt).getTime()) / (1000 * 60);
+        if (orderAgeMinutes > 20) {
+          markAlertSent(order.orderId);
+          continue;
+        }
       }
 
       const phone = order.customer?.phone;
