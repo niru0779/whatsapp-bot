@@ -211,7 +211,6 @@ async function startWhatsAppBot() {
 
       // Customer Recognition
       const isContactedCustomer = contactedCustomers.has(senderPhone);
-      const customerOrder = getOrderByPhone(senderPhone);
 
       // 0. Direct 1-Tap Order Confirmation ("1", "confirm", "yes", "haan", "ok")
       const isConfirmIntent =
@@ -294,6 +293,36 @@ async function startWhatsAppBot() {
       recordContactedCustomer(senderPhone);
       console.log(`📩 [VERIFIED CUSTOMER] ${senderPhone}: "${text}"`);
 
+      // Order lookup (local cache + live sync fallback)
+      let customerOrder = getOrderByPhone(senderPhone);
+      if (!customerOrder) {
+        try {
+          const res = await fetch("https://youthup.in/api/orders");
+          const data = await res.json();
+          if (data && data.success && Array.isArray(data.orders)) {
+            for (const o of data.orders) {
+              const p = String(o.customer?.phone || "").replace(/[^0-9]/g, "").slice(-10);
+              if (p === senderPhone) {
+                customerOrder = {
+                  orderId: o.orderId,
+                  phone: p,
+                  customerName: o.customer?.name || "Customer",
+                  productTitle: o.item?.title || "YouthUp Product",
+                  totalAmount: o.item?.totalAmount || 0,
+                  createdAt: o.createdAt || new Date().toISOString(),
+                  paidVip: o.paymentStatus === "PAID" || o.paymentStatus === "VIP_TOKEN_PAID",
+                  reminderSent: false
+                };
+                const trackingMap = getOrderTrackingMap();
+                trackingMap[o.orderId] = customerOrder;
+                saveOrderTrackingMap(trackingMap);
+                break;
+              }
+            }
+          }
+        } catch (e) {}
+      }
+
       // ---------------------------------------------------------
       // ORDER INTENT HANDLERS:
       // ---------------------------------------------------------
@@ -359,20 +388,32 @@ async function startWhatsAppBot() {
       }
 
       // 3. BUYER REPLIED "50" (Wants to pay VIP advance token)
+      // 1-Click direct UPI open link + 1-Tap web UPI link
       if (isVipTokenRequest) {
+        const orderId = customerOrder?.orderId || "YU-ORDER";
         const totalAmt = customerOrder?.totalAmount || 0;
-        const remainingCod = Math.max(0, totalAmt - 50);
+        const remainingCod = totalAmt > 50 ? totalAmt - 50 : 0;
+        const directUpiLink = `upi://pay?pa=9555247659@paytm&pn=YouthUp&am=50&tn=VIP_${orderId}`;
+        const payWebUrl = `https://youthup.in/pay?id=${orderId}`;
 
         const replyText =
           `⚡ *₹50 Advance Token Payment (VIP Fast Delivery):*\n\n` +
-          `Aap kisi bhi UPI App (PhonePe / Google Pay / Paytm) se ₹50 send kar sakte hain:\n\n` +
-          `📱 *UPI ID:* 9555247659@ybl\n` +
-          `👤 *Account Name:* YouthUp Store\n` +
-          `💰 *Amount:* ₹50\n\n` +
+          `Aap neeche diye gaye link par click karke 1-Tap mein seedha kisi bhi UPI App (PhonePe / Google Pay / Paytm) se ₹50 send kar sakte hain:\n\n` +
+          `🔘 *1-CLICK DIRECT UPI OPEN:*\n` +
+          `👉 (Direct UPI App: ${directUpiLink})\n\n` +
+          `🌐 *Ya 1-Click Pay Link:*\n` +
+          `👉 ${payWebUrl}\n\n` +
+          `📱 *Manual UPI Details:*\n` +
+          `• UPI ID: 9555247659@paytm\n` +
+          `• Account Name: YouthUp\n` +
+          `• Amount: ₹50\n` +
+          `• Note: VIP_${orderId}\n\n` +
           `✅ *Pay karne ke baad yahan SCREENSHOT ya "PAID" likhkar bhej dein.*\n\n` +
           `⚡ *Fayde:*\n` +
           `1. Parcel aaj hi VIP Priority se express courier se dispatch hoga.\n` +
-          `2. Delivery ke waqt flat ₹50 KAM (sirf *₹${remainingCod > 0 ? remainingCod : "discounted balance"}*) COD dena hoga!`;
+          (remainingCod > 0
+            ? `2. Delivery ke waqt flat ₹50 KAM (sirf *₹${remainingCod}*) COD dena hoga!`
+            : `2. Delivery ke waqt flat ₹50 KAM COD dena hoga!`);
 
         await sock.sendMessage(sender, { text: replyText });
         console.log(`🤖 Sent VIP Token UPI Instructions to ${senderPhone}`);
@@ -506,6 +547,8 @@ async function checkAndSendVipReminders() {
 
         const jid = `91${cleanPhone}@s.whatsapp.net`;
         const remainingCod = Math.max(0, (order.totalAmount || 0) - 50);
+        const directUpiLink = `upi://pay?pa=9555247659@paytm&pn=YouthUp&am=50&tn=VIP_${order.orderId}`;
+        const payWebUrl = `https://youthup.in/pay?id=${order.orderId}`;
 
         const reminderMsg =
 `⏰ *REMINDER: VIP Priority Dispatch Offer - YouthUp Store*
@@ -517,7 +560,9 @@ Aapka Order #${order.orderId} (${order.productTitle || "Product"}) warehouse pac
 Agar aap sirf *₹50 Advance Token* pay karte hain toh delivery boy ko parcel milne par Flat ₹50 KAM (sirf *₹${remainingCod}*) COD dena hoga aur parcel *Superfast VIP Priority* se dispatch hoga!
 
 🔘 *[ ⚡ PAY ₹50 VIP TOKEN ]*
-👉 Bas *50* reply karein aur token pay karein.
+👉 Direct UPI App: (Direct UPI App: ${directUpiLink})
+👉 1-Click Pay Link: ${payWebUrl}
+👉 Ya bas *50* reply karein.
 
 🔘 *[ 📍 TRACK ORDER ]*
 👉 Order live track karne ke liye *TRACK* reply karein.
@@ -627,7 +672,7 @@ async function checkAndSendNewOrderAlerts() {
       };
       saveOrderTrackingMap(trackingMap);
 
-      // NO RAW WEBSITE LINKS! Clean Button-Style Action Prompts
+      // Clean Button-Style Action Prompts
       const messageText = 
 `🎉 *Namaste ${order.customer?.name || "Customer"} Ji!*
 YouthUp Store se aapka order successfully book ho gaya hai.
